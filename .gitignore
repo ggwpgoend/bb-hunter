@@ -1,0 +1,7 @@
+/bb-hunter
+*.exe
+scope.yaml
+*.db
+*.bolt
+.env
+/vendor/
