@@ -236,6 +236,33 @@ func TestBuildAnalysisPrompt(t *testing.T) {
 	}
 }
 
+func TestRepairJSON(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		valid bool
+	}{
+		{"complete", `{"a":"b"}`, true},
+		{"truncated string", `{"a":"trunc`, true},
+		{"truncated brace", `{"a":"b"`, true},
+		{"truncated nested", `{"a":{"b":"c"`, true},
+		{"empty", "", true},
+		{"truncated array", `{"a":[1,2`, true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			repaired := repairJSON(tc.input)
+			if tc.valid {
+				var v any
+				if err := json.Unmarshal([]byte(repaired), &v); err != nil {
+					t.Errorf("repairJSON(%q) = %q, not valid JSON: %v", tc.input, repaired, err)
+				}
+			}
+		})
+	}
+}
+
 func containsStr(s, substr string) bool {
 	return len(s) >= len(substr) && searchStr(s, substr)
 }

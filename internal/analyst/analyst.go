@@ -88,7 +88,7 @@ func (a *Analyst) Analyze(ctx context.Context, finding *models.Finding) (*models
 			{Role: llm.RoleSystem, Content: fmt.Sprintf(systemPrompt, sentinel)},
 			{Role: llm.RoleUser, Content: userMsg},
 		},
-		MaxTokens:    1024,
+		MaxTokens:    2048,
 		Temperature:  0.1, // Low temperature for consistent classification
 		JSONMode:     true,
 		SentinelUUID: sentinel,
@@ -113,14 +113,20 @@ func (a *Analyst) Analyze(ctx context.Context, finding *models.Finding) (*models
 		return finding, nil
 	}
 
-	// Parse classification
+	// Parse classification (with truncated JSON repair)
+	content := resp.Content
 	var classification Classification
-	if err := json.Unmarshal([]byte(resp.Content), &classification); err != nil {
-		a.log.Warn("analyst: failed to parse LLM output",
-			"error", err,
-			"content", resp.Content,
-		)
-		return nil, fmt.Errorf("analyst: parse classification: %w", err)
+	if err := json.Unmarshal([]byte(content), &classification); err != nil {
+		// Try to repair truncated JSON by closing open braces/quotes
+		repaired := repairJSON(content)
+		if err2 := json.Unmarshal([]byte(repaired), &classification); err2 != nil {
+			a.log.Warn("analyst: failed to parse LLM output",
+				"error", err,
+				"content", content,
+			)
+			return nil, fmt.Errorf("analyst: parse classification: %w", err)
+		}
+		a.log.Debug("analyst: repaired truncated JSON output")
 	}
 
 	// Validate URLs in hypothesis against scope
@@ -259,4 +265,58 @@ func generateSentinel() string {
 	b := make([]byte, 16)
 	rand.Read(b)
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
+// repairJSON attempts to fix truncated JSON by closing open structures.
+// Handles common LLM truncation: missing closing quotes, braces, brackets.
+func repairJSON(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "{}"
+	}
+
+	// Track open structures
+	inString := false
+	escaped := false
+	var stack []byte
+
+	for _, ch := range []byte(s) {
+		if escaped {
+			escaped = false
+			continue
+		}
+		if ch == '\\' && inString {
+			escaped = true
+			continue
+		}
+		if ch == '"' {
+			inString = !inString
+			continue
+		}
+		if inString {
+			continue
+		}
+		switch ch {
+		case '{':
+			stack = append(stack, '}')
+		case '[':
+			stack = append(stack, ']')
+		case '}', ']':
+			if len(stack) > 0 && stack[len(stack)-1] == ch {
+				stack = stack[:len(stack)-1]
+			}
+		}
+	}
+
+	// Close open string
+	if inString {
+		s += `"`
+	}
+
+	// Close open structures in reverse order
+	for i := len(stack) - 1; i >= 0; i-- {
+		s += string(stack[i])
+	}
+
+	return s
 }
