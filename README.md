@@ -47,6 +47,11 @@ internal/
   analyst/             — LLM-based vulnerability classifier
   reporter/            — LLM-based report generator (Russian, Standoff format)
   hitl/                — Telegram HITL bot (approve/reject findings)
+  differ/              — Scan diff engine (new/gone/changed findings)
+  historian/           — LLM-based trend analysis between scans
+  scheduler/           — Cron-like scan scheduler (interval/daily/weekly)
+  sandbox/             — Rootless Docker sandbox for PoC execution
+  exploiter/           — LLM-based PoC generator + Verifier (P0 #3, #4)
 ```
 
 ## Security
@@ -55,6 +60,9 @@ internal/
 - **IP blocklist**: RFC1918, loopback, link-local, cloud metadata (169.254.169.254), IPv6 ULA — all blocked by default.
 - **Egress proxy**: subprocess tools can only reach in-scope targets.
 - **Redirect checking**: every redirect destination is re-validated against scope.
+- **PoC safety validator**: blocks eval(), exec(), system(), destructive HTTP methods, XSS payloads, SQL injection in generated PoCs.
+- **P0 #3 — PoC determinism**: PoCs use safe canary strings, read-only operations, structured JSON output.
+- **P0 #4 — Verifier raw-finding leak**: Verifier does NOT pass raw scanner evidence to LLM; only PoC execution results.
 
 ## Phase 1 Status
 
@@ -73,3 +81,15 @@ internal/
 - [x] Cost Tracker (per-provider quotas, kill switch)
 - [x] Rate Limiter (per-host token bucket)
 - [x] LLM Client (Gemini + OpenAI-compat with failover)
+
+## Phase 2 Status
+
+- [x] Differ — scan comparison engine (new/gone/changed/unchanged)
+- [x] Historian — LLM-based trend analysis + algorithmic fallback
+- [x] Scheduler — cron-like scan scheduling (interval/daily/weekly)
+- [x] Sandbox — rootless Docker PoC execution (security-hardened)
+- [x] Exploiter — LLM-based safe PoC generation with safety validator
+- [x] Verifier — sandbox-based PoC execution + structured output parsing
+- [x] P0 #3 fix — PoC test-payload determinism
+- [x] P0 #4 fix — Verifier raw-finding leak prevention
+- [x] Pipeline wiring — full 6-stage pipeline in main.go

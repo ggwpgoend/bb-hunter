@@ -17,12 +17,16 @@ import (
 	"github.com/ggwpgoend/bb-hunter/internal/config"
 	"github.com/ggwpgoend/bb-hunter/internal/cost"
 	"github.com/ggwpgoend/bb-hunter/internal/db"
+	"github.com/ggwpgoend/bb-hunter/internal/differ"
+	"github.com/ggwpgoend/bb-hunter/internal/exploiter"
+	"github.com/ggwpgoend/bb-hunter/internal/historian"
 	"github.com/ggwpgoend/bb-hunter/internal/hitl"
 	"github.com/ggwpgoend/bb-hunter/internal/llm"
 	"github.com/ggwpgoend/bb-hunter/internal/models"
 	"github.com/ggwpgoend/bb-hunter/internal/proxy"
 	"github.com/ggwpgoend/bb-hunter/internal/ratelimit"
 	"github.com/ggwpgoend/bb-hunter/internal/reporter"
+	"github.com/ggwpgoend/bb-hunter/internal/sandbox"
 	"github.com/ggwpgoend/bb-hunter/internal/scanner"
 	"github.com/ggwpgoend/bb-hunter/internal/scope"
 )
@@ -39,6 +43,10 @@ func main() {
 	telegramToken := flag.String("telegram-token", "", "Telegram bot token (env: TELEGRAM_BOT_TOKEN)")
 	telegramChatID := flag.String("telegram-chat-id", "", "Telegram chat ID for HITL (env: TELEGRAM_CHAT_ID)")
 	hitlTimeout := flag.Duration("hitl-timeout", 1*time.Hour, "HITL decision timeout")
+	sandboxImage := flag.String("sandbox-image", "python:3.12-slim", "Docker image for PoC sandbox")
+	sandboxMemory := flag.String("sandbox-memory", "256m", "sandbox memory limit")
+	sandboxTimeout := flag.Duration("sandbox-timeout", 30*time.Second, "sandbox execution timeout")
+	enableExploiter := flag.Bool("exploit", false, "enable Exploiter+Verifier (requires Docker)")
 	ratePerSecond := flag.Float64("rate", 10, "requests per second to target")
 	dryRun := flag.Bool("dry-run", false, "parse scope and validate config without scanning")
 	flag.Parse()
@@ -117,7 +125,7 @@ func main() {
 	logger.Info("egress proxy started", "addr", *proxyAddr)
 
 	// Print banner
-	fmt.Fprintf(os.Stderr, "\n=== BB-Hunter Phase 1 ===\n")
+	fmt.Fprintf(os.Stderr, "\n=== BB-Hunter ===\n")
 	fmt.Fprintf(os.Stderr, "Program:    %s\n", sf.Program)
 	fmt.Fprintf(os.Stderr, "Platform:   %s\n", sf.Platform)
 	fmt.Fprintf(os.Stderr, "Domains:    %v\n", sf.Domains)
@@ -212,6 +220,30 @@ func main() {
 	// Initialize agents
 	analystAgent := analyst.NewAnalyst(llmClient, enforcer, logger)
 	reporterAgent := reporter.NewReporter(llmClient, sf.Platform, logger)
+	historian := historian.NewHistorian(llmClient, logger)
+	exploiterAgent := exploiter.NewExploiter(llmClient, logger)
+
+	// Initialize differ
+	diffEngine := differ.New(writer.GetDB())
+
+	// Initialize sandbox + verifier (if Docker available and enabled)
+	var verifier *exploiter.Verifier
+	if *enableExploiter {
+		sbCfg := sandbox.Config{
+			BaseImage:   *sandboxImage,
+			MemoryLimit: *sandboxMemory,
+			Timeout:     *sandboxTimeout,
+			ProxyAddr:   "http://" + *proxyAddr,
+			Logger:      logger,
+		}
+		sb := sandbox.New(sbCfg)
+		if sb.Available() {
+			verifier = exploiter.NewVerifier(sb, logger)
+			logger.Info("sandbox available", "image", *sandboxImage)
+		} else {
+			logger.Warn("Docker not available — Exploiter/Verifier disabled")
+		}
+	}
 
 	// Initialize scanner pipeline
 	pipeline := scanner.NewPipeline(scanner.PipelineConfig{
@@ -339,7 +371,88 @@ func main() {
 		fmt.Fprintf(os.Stdout, "%s\n", f.ReportMarkdown)
 	}
 
-	// Stage 4: HITL — send to Telegram for human review
+	// Stage 4: Differ + Historian — compare with previous scan
+	if ctx.Err() != nil {
+		return
+	}
+
+	previousRunID, _ := diffEngine.LatestRunID(sf.Program, scanResult.Run.ID)
+	if previousRunID != "" {
+		logger.Info("diffing with previous scan", "previous", previousRunID, "current", scanResult.Run.ID)
+		diffResult, diffErr := diffEngine.Diff(previousRunID, scanResult.Run.ID)
+		if diffErr != nil {
+			logger.Error("diff failed", "error", diffErr)
+		} else {
+			logger.Info("diff complete",
+				"new", diffResult.NewCount,
+				"gone", diffResult.GoneCount,
+				"changed", diffResult.ChangedCount,
+				"unchanged", diffResult.UnchangedCount,
+			)
+
+			// Historian analysis
+			analysis := historian.AnalyzeWithoutLLM(diffResult)
+			logger.Info("historian analysis",
+				"risk_level", analysis.RiskLevel,
+				"summary", analysis.Summary,
+			)
+
+			auditLogger.Log(ctx, "diff_analysis", "historian", map[string]string{
+				"previous_run": previousRunID,
+				"current_run":  scanResult.Run.ID,
+				"risk_level":   analysis.RiskLevel,
+				"new":          fmt.Sprintf("%d", diffResult.NewCount),
+				"gone":         fmt.Sprintf("%d", diffResult.GoneCount),
+			})
+		}
+	} else {
+		logger.Info("first scan for program — no diff available")
+	}
+
+	// Stage 5: Exploiter + Verifier (optional)
+	if ctx.Err() != nil {
+		return
+	}
+
+	if *enableExploiter && verifier != nil {
+		logger.Info("running Exploiter+Verifier", "findings", len(reported))
+		for _, f := range reported {
+			if ctx.Err() != nil {
+				break
+			}
+
+			poc, pocErr := exploiterAgent.GeneratePoC(ctx, f)
+			if pocErr != nil {
+				logger.Warn("PoC generation failed", "finding_id", f.ID, "error", pocErr)
+				auditLogger.Log(ctx, "poc_failed", "exploiter", map[string]string{
+					"finding_id": f.ID,
+					"error":      pocErr.Error(),
+				})
+				continue
+			}
+
+			result, verifyErr := verifier.Verify(ctx, poc)
+			if verifyErr != nil {
+				logger.Warn("PoC verification failed", "finding_id", f.ID, "error", verifyErr)
+				continue
+			}
+
+			auditLogger.Log(ctx, "poc_verified", "verifier", map[string]string{
+				"finding_id": f.ID,
+				"verified":   fmt.Sprintf("%t", result.Verified),
+				"evidence":   result.Evidence,
+				"duration":   result.Duration.String(),
+			})
+
+			if result.Verified {
+				logger.Info("PoC VERIFIED", "finding_id", f.ID, "evidence", result.Evidence)
+			} else {
+				logger.Info("PoC not verified", "finding_id", f.ID, "evidence", result.Evidence)
+			}
+		}
+	}
+
+	// Stage 6: HITL — send to Telegram for human review
 	var approved []*models.Finding
 	if *telegramToken != "" && *telegramChatID != "" {
 		chatID, parseErr := strconv.ParseInt(*telegramChatID, 10, 64)
@@ -422,6 +535,7 @@ func main() {
 	fmt.Fprintf(os.Stderr, "Analyzed:        %d\n", len(analyzed))
 	fmt.Fprintf(os.Stderr, "Reports:         %d\n", len(reported))
 	fmt.Fprintf(os.Stderr, "Approved:        %d\n", len(approved))
+	fmt.Fprintf(os.Stderr, "Exploiter:       %v\n", *enableExploiter)
 	fmt.Fprintf(os.Stderr, "====================\n")
 
 	auditLogger.Log(ctx, "pipeline_completed", "system", map[string]string{
