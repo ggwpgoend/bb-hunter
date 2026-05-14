@@ -1,0 +1,38 @@
+# BB-Hunter scope configuration example
+# Copy to scope.yaml and adjust for your target program.
+#
+# IMPORTANT: Double-check domains against the official scope!
+# A typo here can lead to out-of-scope scanning = ban.
+
+program: "Example Bug Bounty Program"
+
+# Platform: standoff, bizone, bugbountyru
+platform: "standoff"
+
+# In-scope domains:
+#   "example.com"     — example.com + all subdomains
+#   "*.example.com"   — only subdomains (not example.com itself)
+domains:
+  - "example.com"
+  - "*.target.ru"
+
+# Optional: specific IPs/CIDRs that are in scope
+# (e.g., if the program lists IP ranges)
+# allowed_ips:
+#   - "10.20.30.0/24"
+
+# Max HTTP redirects to follow (default: 10)
+max_redirects: 10
+
+# Per-host rate limit in requests/second
+# Respect the program's rate limit policy!
+rate_limit: 10.0
+
+# Minimum nuclei severity to scan for: info, low, medium, high, critical
+nuclei_severity: "medium"
+
+# URL paths to exclude from scanning (regex patterns)
+# excluded_paths:
+#   - "^/logout"
+#   - "^/api/v1/delete"
+#   - "^/admin/.*reset"
