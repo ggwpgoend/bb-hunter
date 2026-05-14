@@ -7,15 +7,19 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/ggwpgoend/bb-hunter/internal/analyst"
 	"github.com/ggwpgoend/bb-hunter/internal/audit"
 	"github.com/ggwpgoend/bb-hunter/internal/config"
 	"github.com/ggwpgoend/bb-hunter/internal/cost"
 	"github.com/ggwpgoend/bb-hunter/internal/db"
+	"github.com/ggwpgoend/bb-hunter/internal/hitl"
 	"github.com/ggwpgoend/bb-hunter/internal/llm"
+	"github.com/ggwpgoend/bb-hunter/internal/models"
 	"github.com/ggwpgoend/bb-hunter/internal/proxy"
 	"github.com/ggwpgoend/bb-hunter/internal/ratelimit"
 	"github.com/ggwpgoend/bb-hunter/internal/reporter"
@@ -32,9 +36,20 @@ func main() {
 	cerebrasKey := flag.String("cerebras-key", "", "Cerebras API key (env: CEREBRAS_API_KEY)")
 	groqKey := flag.String("groq-key", "", "Groq API key (env: GROQ_API_KEY)")
 	sambaKey := flag.String("samba-key", "", "SambaNova API key (env: SAMBA_API_KEY)")
+	telegramToken := flag.String("telegram-token", "", "Telegram bot token (env: TELEGRAM_BOT_TOKEN)")
+	telegramChatID := flag.String("telegram-chat-id", "", "Telegram chat ID for HITL (env: TELEGRAM_CHAT_ID)")
+	hitlTimeout := flag.Duration("hitl-timeout", 1*time.Hour, "HITL decision timeout")
 	ratePerSecond := flag.Float64("rate", 10, "requests per second to target")
 	dryRun := flag.Bool("dry-run", false, "parse scope and validate config without scanning")
 	flag.Parse()
+
+	// Fallback to env vars for Telegram config
+	if *telegramToken == "" {
+		*telegramToken = os.Getenv("TELEGRAM_BOT_TOKEN")
+	}
+	if *telegramChatID == "" {
+		*telegramChatID = os.Getenv("TELEGRAM_CHAT_ID")
+	}
 
 	// Fallback to env vars for API keys
 	if *geminiKey == "" {
@@ -324,6 +339,81 @@ func main() {
 		fmt.Fprintf(os.Stdout, "%s\n", f.ReportMarkdown)
 	}
 
+	// Stage 4: HITL — send to Telegram for human review
+	var approved []*models.Finding
+	if *telegramToken != "" && *telegramChatID != "" {
+		chatID, parseErr := strconv.ParseInt(*telegramChatID, 10, 64)
+		if parseErr != nil {
+			logger.Error("invalid telegram-chat-id", "error", parseErr)
+			os.Exit(1)
+		}
+
+		hitlBot := hitl.NewBot(hitl.Config{
+			Token:   *telegramToken,
+			ChatID:  chatID,
+			Timeout: *hitlTimeout,
+			Logger:  logger,
+			OnDecision: func(dctx context.Context, d hitl.Decision) error {
+				now := time.Now()
+				var newStatus models.FindingStatus
+				switch d.State {
+				case hitl.StateApproved:
+					newStatus = models.StatusApproved
+				case hitl.StateRejected, hitl.StateTimedOut:
+					newStatus = models.StatusRejected
+				default:
+					newStatus = models.StatusRejected
+				}
+
+				// Find and update the finding
+				for _, f := range reported {
+					if f.ID == d.FindingID {
+						f.Status = newStatus
+						f.HITLDecision = d.Reason
+						f.HITLDecidedAt = &now
+						f.UpdatedAt = now
+						writer.WriteFinding(dctx, f)
+
+						if newStatus == models.StatusApproved {
+							approved = append(approved, f)
+						}
+						break
+					}
+				}
+
+				auditLogger.Log(dctx, models.AuditHITLDecision, "hitl", map[string]string{
+					"finding_id": d.FindingID,
+					"state":      string(d.State),
+					"reason":     d.Reason,
+				})
+
+				return nil
+			},
+		})
+
+		// Start polling in background
+		go hitlBot.StartPolling(ctx)
+
+		// Send findings to Telegram
+		logger.Info("sending findings to Telegram for review", "count", len(reported))
+		if err := hitlBot.SendBatch(ctx, reported); err != nil {
+			logger.Error("failed to send findings to Telegram", "error", err)
+		}
+
+		// Wait for all decisions
+		logger.Info("waiting for human decisions via Telegram",
+			"pending", hitlBot.PendingCount(),
+			"timeout", hitlTimeout.String(),
+		)
+		hitlBot.WaitForAll(ctx)
+		hitlBot.Stop()
+
+		logger.Info("HITL decisions completed", "approved", len(approved))
+	} else {
+		logger.Info("HITL skipped — no Telegram token/chat-id configured")
+		approved = reported
+	}
+
 	// Final summary
 	fmt.Fprintf(os.Stderr, "\n=== Scan Complete ===\n")
 	fmt.Fprintf(os.Stderr, "Hosts scanned:   %d\n", scanResult.Run.HostsScanned)
@@ -331,12 +421,14 @@ func main() {
 	fmt.Fprintf(os.Stderr, "Raw findings:    %d\n", len(scanResult.Findings))
 	fmt.Fprintf(os.Stderr, "Analyzed:        %d\n", len(analyzed))
 	fmt.Fprintf(os.Stderr, "Reports:         %d\n", len(reported))
+	fmt.Fprintf(os.Stderr, "Approved:        %d\n", len(approved))
 	fmt.Fprintf(os.Stderr, "====================\n")
 
 	auditLogger.Log(ctx, "pipeline_completed", "system", map[string]string{
 		"raw_findings": fmt.Sprintf("%d", len(scanResult.Findings)),
 		"analyzed":     fmt.Sprintf("%d", len(analyzed)),
 		"reported":     fmt.Sprintf("%d", len(reported)),
+		"approved":     fmt.Sprintf("%d", len(approved)),
 	})
 
 	// Verify audit log integrity

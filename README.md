@@ -37,6 +37,16 @@ internal/
   scope/               — ScopeEnforcer (pinned-IP dialer, IP blocklist, domain matching)
   proxy/               — Egress HTTP proxy for subprocess scope enforcement
   config/              — Configuration loader (scope.yaml)
+  models/              — Core domain types (Finding, ScanRun, AuditEntry)
+  db/                  — SQLite writer (single-goroutine, WAL, batch commits)
+  audit/               — Tamper-evident hash-chain audit logger
+  llm/                 — Multi-provider LLM client (Gemini, OpenAI-compat)
+  cost/                — Per-provider quota tracker with kill switch
+  ratelimit/           — Per-host token bucket rate limiter
+  scanner/             — Recon pipeline (subfinder→httpx→katana→nuclei)
+  analyst/             — LLM-based vulnerability classifier
+  reporter/            — LLM-based report generator (Russian, Standoff format)
+  hitl/                — Telegram HITL bot (approve/reject findings)
 ```
 
 ## Security
@@ -54,8 +64,12 @@ internal/
 - [x] Redirect validation
 - [x] Egress proxy (HTTP + CONNECT tunneling)
 - [x] Config loader with validation
-- [ ] Scanner pipeline
-- [ ] Analyst agent
-- [ ] Reporter agent
-- [ ] Audit Logger
-- [ ] Telegram HITL
+- [x] Scanner pipeline
+- [x] Analyst agent (LLM classification)
+- [x] Reporter agent (Russian reports)
+- [x] Audit Logger (hash-chain)
+- [x] Telegram HITL (approve/reject via bot)
+- [x] DBWriter (SQLite, WAL, batch commits)
+- [x] Cost Tracker (per-provider quotas, kill switch)
+- [x] Rate Limiter (per-host token bucket)
+- [x] LLM Client (Gemini + OpenAI-compat with failover)
