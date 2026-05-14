@@ -10,12 +10,16 @@ import (
 	"strings"
 	"syscall"
 
+	"time"
+
 	"github.com/ggwpgoend/bb-hunter/internal/analyst"
 	"github.com/ggwpgoend/bb-hunter/internal/audit"
 	"github.com/ggwpgoend/bb-hunter/internal/config"
 	"github.com/ggwpgoend/bb-hunter/internal/cost"
 	"github.com/ggwpgoend/bb-hunter/internal/db"
+	"github.com/ggwpgoend/bb-hunter/internal/hitl"
 	"github.com/ggwpgoend/bb-hunter/internal/llm"
+	"github.com/ggwpgoend/bb-hunter/internal/models"
 	"github.com/ggwpgoend/bb-hunter/internal/proxy"
 	"github.com/ggwpgoend/bb-hunter/internal/ratelimit"
 	"github.com/ggwpgoend/bb-hunter/internal/reporter"
@@ -32,6 +36,8 @@ func main() {
 	cerebrasKey := flag.String("cerebras-key", "", "Cerebras API key (env: CEREBRAS_API_KEY)")
 	groqKey := flag.String("groq-key", "", "Groq API key (env: GROQ_API_KEY)")
 	sambaKey := flag.String("samba-key", "", "SambaNova API key (env: SAMBA_API_KEY)")
+	telegramToken := flag.String("telegram-token", "", "Telegram bot token (env: TELEGRAM_BOT_TOKEN)")
+	telegramChat := flag.Int64("telegram-chat", 0, "Telegram chat ID (auto-detected on /start)")
 	ratePerSecond := flag.Float64("rate", 10, "requests per second to target")
 	dryRun := flag.Bool("dry-run", false, "parse scope and validate config without scanning")
 	flag.Parse()
@@ -48,6 +54,9 @@ func main() {
 	}
 	if *sambaKey == "" {
 		*sambaKey = os.Getenv("SAMBA_API_KEY")
+	}
+	if *telegramToken == "" {
+		*telegramToken = os.Getenv("TELEGRAM_BOT_TOKEN")
 	}
 
 	// Setup structured logging
@@ -109,6 +118,9 @@ func main() {
 	fmt.Fprintf(os.Stderr, "Proxy:      %s\n", *proxyAddr)
 	fmt.Fprintf(os.Stderr, "DB:         %s\n", *dbPath)
 	fmt.Fprintf(os.Stderr, "Rate:       %.0f req/s\n", *ratePerSecond)
+	if *telegramToken != "" {
+		fmt.Fprintf(os.Stderr, "Telegram:   enabled\n")
+	}
 	fmt.Fprintf(os.Stderr, "=========================\n\n")
 
 	if *dryRun {
@@ -197,6 +209,17 @@ func main() {
 	// Initialize agents
 	analystAgent := analyst.NewAnalyst(llmClient, enforcer, logger)
 	reporterAgent := reporter.NewReporter(llmClient, sf.Platform, logger)
+
+	// Initialize Telegram HITL bot (optional)
+	var telegramBot *hitl.Bot
+	if *telegramToken != "" {
+		telegramBot = hitl.NewBot(*telegramToken, logger)
+		if *telegramChat != 0 {
+			telegramBot.SetChatID(*telegramChat)
+		}
+		go telegramBot.PollUpdates(ctx)
+		logger.Info("telegram HITL bot started")
+	}
 
 	// Initialize scanner pipeline
 	pipeline := scanner.NewPipeline(scanner.PipelineConfig{
@@ -312,6 +335,58 @@ func main() {
 	}
 
 	logger.Info("reporter generated reports", "count", len(reported))
+
+	// Stage 4: HITL — send to Telegram for approval
+	if telegramBot != nil && len(reported) > 0 {
+		logger.Info("sending findings to Telegram for HITL review", "count", len(reported))
+		for _, f := range reported {
+			if err := telegramBot.SendFinding(ctx, f); err != nil {
+				logger.Warn("hitl: failed to send finding", "finding_id", f.ID, "error", err)
+			}
+		}
+
+		// Wait for decisions (with timeout)
+		fmt.Fprintf(os.Stderr, "\nWaiting for HITL decisions via Telegram... (Ctrl+C to exit)\n")
+		decisionCount := 0
+		hitlTimeout := time.After(30 * time.Minute)
+	hitlLoop:
+		for decisionCount < len(reported) {
+			select {
+			case d := <-telegramBot.Decisions():
+				decisionCount++
+				now := d.DecidedAt
+				for _, f := range reported {
+					if f.ID == d.FindingID {
+						if d.Action == "approve" {
+							f.Status = models.StatusApproved
+						} else {
+							f.Status = models.StatusRejected
+						}
+						f.HITLDecision = d.Action
+						f.HITLDecidedAt = &now
+						f.UpdatedAt = now
+						writer.WriteFinding(ctx, f)
+						auditLogger.Log(ctx, "hitl_decision", "human", map[string]string{
+							"finding_id": f.ID,
+							"action":     d.Action,
+						})
+						logger.Info("hitl: decision applied",
+							"finding_id", f.ID,
+							"action", d.Action,
+							"remaining", len(reported)-decisionCount,
+						)
+						break
+					}
+				}
+			case <-hitlTimeout:
+				logger.Warn("hitl: timeout waiting for decisions", "pending", len(reported)-decisionCount)
+				break hitlLoop
+			case <-ctx.Done():
+				break hitlLoop
+			}
+		}
+		logger.Info("hitl: review complete", "decided", decisionCount, "total", len(reported))
+	}
 
 	// Output reports to stdout
 	for i, f := range reported {
