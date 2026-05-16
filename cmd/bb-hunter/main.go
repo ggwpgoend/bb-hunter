@@ -32,7 +32,9 @@ import (
 	"github.com/ggwpgoend/bb-hunter/internal/reporter"
 	"github.com/ggwpgoend/bb-hunter/internal/sandbox"
 	"github.com/ggwpgoend/bb-hunter/internal/scanner"
+	"github.com/ggwpgoend/bb-hunter/internal/scheduler"
 	"github.com/ggwpgoend/bb-hunter/internal/scope"
+	"github.com/ggwpgoend/bb-hunter/internal/submit"
 )
 
 func main() {
@@ -44,6 +46,7 @@ func main() {
 	cerebrasKey := flag.String("cerebras-key", "", "Cerebras API key (env: CEREBRAS_API_KEY)")
 	groqKey := flag.String("groq-key", "", "Groq API key (env: GROQ_API_KEY)")
 	sambaKey := flag.String("samba-key", "", "SambaNova API key (env: SAMBA_API_KEY)")
+	openrouterKey := flag.String("openrouter-key", "", "OpenRouter API key (env: OPENROUTER_API_KEY)")
 	telegramToken := flag.String("telegram-token", "", "Telegram bot token (env: TELEGRAM_BOT_TOKEN)")
 	telegramChatID := flag.String("telegram-chat-id", "", "Telegram chat ID for HITL (env: TELEGRAM_CHAT_ID)")
 	hitlTimeout := flag.Duration("hitl-timeout", 1*time.Hour, "HITL decision timeout")
@@ -55,6 +58,11 @@ func main() {
 	screenshotDir := flag.String("screenshot-dir", "screenshots", "directory for browser PoC screenshots")
 	ratePerSecond := flag.Float64("rate", 10, "requests per second to target")
 	dryRun := flag.Bool("dry-run", false, "parse scope and validate config without scanning")
+	checkLLM := flag.Bool("check-llm", false, "check LLM provider availability and exit")
+	parallelWorkers := flag.Int("parallel", 0, "parallel scan workers (0 = sequential, N = N goroutines per domain group)")
+	monitorMode := flag.Bool("monitor", false, "enable continuous monitoring mode (re-scan on interval)")
+	monitorInterval := flag.Duration("monitor-interval", 6*time.Hour, "interval between monitor scans")
+	autoSubmit := flag.Bool("auto-submit", false, "auto-submit approved findings to platform API (stub)")
 	flag.Parse()
 
 	// Fallback to env vars for Telegram config
@@ -77,6 +85,9 @@ func main() {
 	}
 	if *sambaKey == "" {
 		*sambaKey = os.Getenv("SAMBA_API_KEY")
+	}
+	if *openrouterKey == "" {
+		*openrouterKey = os.Getenv("OPENROUTER_API_KEY")
 	}
 
 	// Setup structured logging
@@ -187,9 +198,9 @@ func main() {
 		logger.Info("LLM provider added", "name", "gemini", "model", "gemini-2.5-flash")
 	}
 	if *cerebrasKey != "" {
-		providers = append(providers, llm.NewOpenAICompatProvider("cerebras", "https://api.cerebras.ai/v1", *cerebrasKey, "qwen3-235b"))
+		providers = append(providers, llm.NewOpenAICompatProvider("cerebras", "https://api.cerebras.ai/v1", *cerebrasKey, "qwen-3-235b-a22b-instruct-2507"))
 		quotas = append(quotas, cost.ProviderQuota{Name: "cerebras", DailyRequests: 200})
-		logger.Info("LLM provider added", "name", "cerebras", "model", "qwen3-235b")
+		logger.Info("LLM provider added", "name", "cerebras", "model", "qwen-3-235b-a22b")
 	}
 	if *groqKey != "" {
 		providers = append(providers, llm.NewOpenAICompatProvider("groq", "https://api.groq.com/openai/v1", *groqKey, "llama-3.3-70b-versatile"))
@@ -197,14 +208,53 @@ func main() {
 		logger.Info("LLM provider added", "name", "groq", "model", "llama-3.3-70b")
 	}
 	if *sambaKey != "" {
-		providers = append(providers, llm.NewOpenAICompatProvider("sambanova", "https://api.sambanova.ai/v1", *sambaKey, "Meta-Llama-3.1-70B-Instruct"))
+		providers = append(providers, llm.NewOpenAICompatProvider("sambanova", "https://api.sambanova.ai/v1", *sambaKey, "Meta-Llama-3.3-70B-Instruct"))
 		quotas = append(quotas, cost.ProviderQuota{Name: "sambanova", DailyRequests: 200})
-		logger.Info("LLM provider added", "name", "sambanova", "model", "Meta-Llama-3.1-70B")
+		logger.Info("LLM provider added", "name", "sambanova", "model", "Meta-Llama-3.3-70B")
+	}
+	if *openrouterKey != "" {
+		providers = append(providers, llm.NewOpenAICompatProvider("openrouter", "https://openrouter.ai/api/v1", *openrouterKey, "meta-llama/llama-3.3-70b-instruct:free"))
+		quotas = append(quotas, cost.ProviderQuota{Name: "openrouter", DailyRequests: 200})
+		logger.Info("LLM provider added", "name", "openrouter", "model", "llama-3.3-70b-instruct:free")
 	}
 
 	if len(providers) == 0 {
-		logger.Error("no LLM providers configured — provide at least one API key (--gemini-key, --cerebras-key, --groq-key, --samba-key or env vars)")
+		logger.Error("no LLM providers configured — provide at least one API key (--gemini-key, --cerebras-key, --groq-key, --samba-key, --openrouter-key or env vars)")
 		os.Exit(1)
+	}
+
+	// --check-llm: verify provider connectivity and exit
+	if *checkLLM {
+		tmpClient, _ := llm.NewClient(providers...)
+		fmt.Println("🔍 Checking LLM provider availability...")
+		fmt.Println()
+		results := tmpClient.CheckHealth(ctx)
+		allOK := true
+		for _, r := range results {
+			if r.OK {
+				fmt.Printf("  ✅ %-12s %-30s %s\n", r.Provider, r.Model, r.Latency.Round(time.Millisecond))
+			} else {
+				allOK = false
+				errMsg := r.Error
+				if len(errMsg) > 80 {
+					errMsg = errMsg[:80] + "..."
+				}
+				fmt.Printf("  ❌ %-12s %-30s %s\n", r.Provider, r.Model, errMsg)
+			}
+		}
+		fmt.Println()
+		if allOK {
+			fmt.Printf("All %d providers available.\n", len(results))
+		} else {
+			okCount := 0
+			for _, r := range results {
+				if r.OK {
+					okCount++
+				}
+			}
+			fmt.Printf("%d/%d providers available.\n", okCount, len(results))
+		}
+		os.Exit(0)
 	}
 
 	// Initialize cost tracker
@@ -222,6 +272,35 @@ func main() {
 		logger.Error("failed to create LLM client", "error", err)
 		os.Exit(1)
 	}
+
+	// Startup health check: verify at least one LLM provider is reachable
+	logger.Info("checking LLM provider availability...")
+	healthResults := llmClient.CheckHealth(ctx)
+	availableCount := 0
+	for _, hr := range healthResults {
+		if hr.OK {
+			availableCount++
+			logger.Info("LLM provider available",
+				"provider", hr.Provider,
+				"model", hr.Model,
+				"latency", hr.Latency.Round(time.Millisecond),
+			)
+		} else {
+			logger.Warn("LLM provider unavailable",
+				"provider", hr.Provider,
+				"model", hr.Model,
+				"error", hr.Error,
+			)
+		}
+	}
+	if availableCount == 0 {
+		logger.Error("no LLM providers are reachable — check API keys, network, and VPN")
+		os.Exit(1)
+	}
+	logger.Info("LLM health check complete",
+		"available", availableCount,
+		"total", len(healthResults),
+	)
 
 	// Initialize agents
 	analystAgent := analyst.NewAnalyst(llmClient, enforcer, logger)
@@ -254,8 +333,8 @@ func main() {
 		}
 	}
 
-	// Initialize scanner pipeline
-	pipeline := scanner.NewPipeline(scanner.PipelineConfig{
+	// Initialize scanner pipeline config
+	pipelineCfg := scanner.PipelineConfig{
 		Domains:        sf.Domains,
 		ProxyAddr:      "http://" + *proxyAddr,
 		RateLimit:      *ratePerSecond,
@@ -263,29 +342,47 @@ func main() {
 		KatanaDepth:    3,
 		Tools:          scanner.DefaultToolPaths(),
 		Logger:         logger,
-	})
-	orchestrator := scanner.NewOrchestrator(pipeline, sf.Program, logger)
+	}
 
 	// Log pipeline start
 	auditLogger.Log(ctx, "scan_started", "scanner", map[string]string{
-		"domains": strings.Join(sf.Domains, ","),
-		"rate":    fmt.Sprintf("%.0f", *ratePerSecond),
+		"domains":  strings.Join(sf.Domains, ","),
+		"rate":     fmt.Sprintf("%.0f", *ratePerSecond),
+		"parallel": fmt.Sprintf("%d", *parallelWorkers),
+		"monitor":  fmt.Sprintf("%t", *monitorMode),
 	})
 
 	logger.Info("starting scan pipeline",
 		"domains", sf.Domains,
 		"rate", *ratePerSecond,
 		"providers", len(providers),
+		"parallel", *parallelWorkers,
+		"monitor", *monitorMode,
 	)
 
 	// === PIPELINE: scan → analyze → report ===
 
-	// Stage 1: Run scanner
-	scanResult, err := orchestrator.RunFull(ctx)
-	if err != nil {
-		logger.Error("scan failed", "error", err)
-		auditLogger.Log(ctx, "scan_failed", "scanner", map[string]string{"error": err.Error()})
-		os.Exit(1)
+	// Stage 1: Run scanner (sequential or parallel)
+	var scanResult *scanner.ScanResult
+	if *parallelWorkers > 0 {
+		po := scanner.NewParallelOrchestrator(pipelineCfg, sf.Program, *parallelWorkers, logger)
+		domainResults, parallelErr := po.RunParallel(ctx)
+		if parallelErr != nil {
+			logger.Error("parallel scan failed", "error", parallelErr)
+			auditLogger.Log(ctx, "scan_failed", "scanner", map[string]string{"error": parallelErr.Error()})
+			os.Exit(1)
+		}
+		scanResult = scanner.MergeResults(domainResults, sf.Program)
+	} else {
+		pipeline := scanner.NewPipeline(pipelineCfg)
+		orchestrator := scanner.NewOrchestrator(pipeline, sf.Program, logger)
+		var scanErr error
+		scanResult, scanErr = orchestrator.RunFull(ctx)
+		if scanErr != nil {
+			logger.Error("scan failed", "error", scanErr)
+			auditLogger.Log(ctx, "scan_failed", "scanner", map[string]string{"error": scanErr.Error()})
+			os.Exit(1)
+		}
 	}
 
 	auditLogger.Log(ctx, "scan_completed", "scanner", map[string]string{
@@ -715,6 +812,30 @@ func main() {
 		approved = reported
 	}
 
+	// Stage 7: Auto-submit approved findings to platform (stub)
+	if *autoSubmit && len(approved) > 0 {
+		var submitter submit.Submitter
+		switch sf.Platform {
+		case "bizone":
+			submitter = submit.NewBizoneSubmitter("", "", logger)
+		default:
+			submitter = submit.NewStandoffSubmitter("", "", logger)
+		}
+
+		logger.Info("auto-submitting approved findings",
+			"count", len(approved),
+			"platform", submitter.Name(),
+		)
+		submitResults := submit.BatchSubmit(ctx, submitter, approved, logger)
+		for _, sr := range submitResults {
+			auditLogger.Log(ctx, "finding_submitted", "submit", map[string]string{
+				"finding_id": sr.FindingID,
+				"platform":   sr.Platform,
+				"success":    fmt.Sprintf("%t", sr.Success),
+			})
+		}
+	}
+
 	// Final summary
 	fmt.Fprintf(os.Stderr, "\n=== Scan Complete ===\n")
 	fmt.Fprintf(os.Stderr, "Hosts scanned:   %d\n", scanResult.Run.HostsScanned)
@@ -725,6 +846,7 @@ func main() {
 	fmt.Fprintf(os.Stderr, "Approved:        %d\n", len(approved))
 	fmt.Fprintf(os.Stderr, "Gate filtered:   %d\n", len(gateFiltered))
 	fmt.Fprintf(os.Stderr, "Exploiter:       %v\n", *enableExploiter)
+	fmt.Fprintf(os.Stderr, "Auto-submit:     %v\n", *autoSubmit)
 	fmt.Fprintf(os.Stderr, "====================\n")
 
 	auditLogger.Log(ctx, "pipeline_completed", "system", map[string]string{
@@ -740,6 +862,67 @@ func main() {
 		logger.Error("audit log integrity check FAILED", "error", err)
 	} else {
 		logger.Info("audit log integrity verified", "entries", count)
+	}
+
+	// Continuous monitoring mode
+	if *monitorMode {
+		logger.Info("entering continuous monitoring mode",
+			"interval", monitorInterval.String(),
+		)
+		fmt.Fprintf(os.Stderr, "\n=== Monitor Mode ===\n")
+		fmt.Fprintf(os.Stderr, "Interval: %s\n", monitorInterval.String())
+		fmt.Fprintf(os.Stderr, "Press Ctrl+C to stop.\n\n")
+
+		monSched := scheduler.New([]scheduler.Schedule{
+			{
+				ProgramID: sf.Program,
+				Type:      scheduler.ScheduleInterval,
+				Interval:  *monitorInterval,
+				RunType:   "delta",
+				Enabled:   true,
+			},
+		}, func(sctx context.Context, programID, runType string) error {
+			logger.Info("monitor: starting scheduled scan",
+				"program", programID,
+				"run_type", runType,
+			)
+			auditLogger.Log(sctx, "monitor_scan_started", "scheduler", map[string]string{
+				"program":  programID,
+				"run_type": runType,
+			})
+
+			var monResult *scanner.ScanResult
+			if *parallelWorkers > 0 {
+				po := scanner.NewParallelOrchestrator(pipelineCfg, programID, *parallelWorkers, logger)
+				dr, pErr := po.RunParallel(sctx)
+				if pErr != nil {
+					return pErr
+				}
+				monResult = scanner.MergeResults(dr, programID)
+			} else {
+				p := scanner.NewPipeline(pipelineCfg)
+				o := scanner.NewOrchestrator(p, programID, logger)
+				var sErr error
+				monResult, sErr = o.RunFull(sctx)
+				if sErr != nil {
+					return sErr
+				}
+			}
+
+			writer.WriteScanRun(sctx, monResult.Run)
+			logger.Info("monitor: scan complete",
+				"findings", monResult.Run.FindingsTotal,
+				"hosts", monResult.Run.HostsScanned,
+			)
+
+			auditLogger.Log(sctx, "monitor_scan_completed", "scheduler", map[string]string{
+				"findings": fmt.Sprintf("%d", monResult.Run.FindingsTotal),
+			})
+
+			return nil
+		}, logger)
+
+		monSched.Start(ctx) // blocks until ctx is cancelled
 	}
 
 	// Graceful shutdown
