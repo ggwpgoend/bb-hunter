@@ -177,3 +177,73 @@ func TestNewClient_NoProviders(t *testing.T) {
 		t.Errorf("expected ErrNoProviders, got %v", err)
 	}
 }
+
+func TestClient_CheckHealth_AllOK(t *testing.T) {
+	p1 := &mockProvider{
+		name: "prov1", model: "m1", available: true,
+		response: &Response{Content: "ok", Latency: 50 * time.Millisecond},
+	}
+	p2 := &mockProvider{
+		name: "prov2", model: "m2", available: true,
+		response: &Response{Content: "ok", Latency: 100 * time.Millisecond},
+	}
+
+	client, _ := NewClient(p1, p2)
+	results := client.CheckHealth(context.Background())
+	if len(results) != 2 {
+		t.Fatalf("expected 2 results, got %d", len(results))
+	}
+	for _, r := range results {
+		if !r.OK {
+			t.Errorf("%s should be OK", r.Provider)
+		}
+		if r.Error != "" {
+			t.Errorf("%s unexpected error: %s", r.Provider, r.Error)
+		}
+	}
+}
+
+func TestClient_CheckHealth_Mixed(t *testing.T) {
+	p1 := &mockProvider{
+		name: "healthy", model: "m1", available: true,
+		response: &Response{Content: "ok", Latency: 30 * time.Millisecond},
+	}
+	p2 := &mockProvider{
+		name: "broken", model: "m2", available: true,
+		err: errors.New("connection refused"),
+	}
+	p3 := &mockProvider{
+		name: "limited", model: "m3", available: false,
+	}
+
+	client, _ := NewClient(p1, p2, p3)
+	results := client.CheckHealth(context.Background())
+	if len(results) != 3 {
+		t.Fatalf("expected 3 results, got %d", len(results))
+	}
+
+	if !results[0].OK {
+		t.Error("healthy provider should be OK")
+	}
+	if results[1].OK {
+		t.Error("broken provider should not be OK")
+	}
+	if results[1].Error == "" {
+		t.Error("broken provider should have an error")
+	}
+	if results[2].OK {
+		t.Error("rate-limited provider should not be OK")
+	}
+	if results[2].Error != "rate limited" {
+		t.Errorf("expected 'rate limited' error, got '%s'", results[2].Error)
+	}
+}
+
+func TestClient_Providers(t *testing.T) {
+	p1 := &mockProvider{name: "a", model: "m1", available: true, response: &Response{Content: "ok"}}
+	p2 := &mockProvider{name: "b", model: "m2", available: true, response: &Response{Content: "ok"}}
+	client, _ := NewClient(p1, p2)
+	if len(client.Providers()) != 2 {
+		t.Errorf("expected 2 providers, got %d", len(client.Providers()))
+	}
+}
