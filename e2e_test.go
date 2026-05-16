@@ -29,12 +29,29 @@ import (
 )
 
 func setupLLM(t *testing.T) *llm.Client {
-	key := os.Getenv("GEMINI_API_KEY")
-	if key == "" {
-		t.Skip("GEMINI_API_KEY not set")
+	var providers []llm.Provider
+
+	if key := os.Getenv("GEMINI_API_KEY"); key != "" {
+		providers = append(providers, llm.NewGeminiProvider(key, "gemini-2.0-flash"))
 	}
-	provider := llm.NewGeminiProvider(key, "gemini-2.0-flash")
-	client, err := llm.NewClient(provider)
+	if key := os.Getenv("CEREBRAS_API_KEY"); key != "" {
+		providers = append(providers, llm.NewOpenAICompatProvider("cerebras", "https://api.cerebras.ai/v1", key, "qwen-3-235b-a22b-instruct-2507"))
+	}
+	if key := os.Getenv("GROQ_API_KEY"); key != "" {
+		providers = append(providers, llm.NewOpenAICompatProvider("groq", "https://api.groq.com/openai/v1", key, "llama-3.3-70b-versatile"))
+	}
+	if key := os.Getenv("SAMBA_API_KEY"); key != "" {
+		providers = append(providers, llm.NewOpenAICompatProvider("sambanova", "https://api.sambanova.ai/v1", key, "Meta-Llama-3.3-70B-Instruct"))
+	}
+	if key := os.Getenv("OPENROUTER_API_KEY"); key != "" {
+		providers = append(providers, llm.NewOpenAICompatProvider("openrouter", "https://openrouter.ai/api/v1", key, "meta-llama/llama-3.3-70b-instruct:free"))
+	}
+
+	if len(providers) == 0 {
+		t.Skip("no LLM API keys set (GEMINI_API_KEY, CEREBRAS_API_KEY, GROQ_API_KEY, SAMBA_API_KEY, OPENROUTER_API_KEY)")
+	}
+
+	client, err := llm.NewClient(providers...)
 	if err != nil {
 		t.Fatalf("failed to create LLM client: %v", err)
 	}
