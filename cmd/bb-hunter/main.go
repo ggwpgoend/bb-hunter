@@ -44,6 +44,7 @@ func main() {
 	cerebrasKey := flag.String("cerebras-key", "", "Cerebras API key (env: CEREBRAS_API_KEY)")
 	groqKey := flag.String("groq-key", "", "Groq API key (env: GROQ_API_KEY)")
 	sambaKey := flag.String("samba-key", "", "SambaNova API key (env: SAMBA_API_KEY)")
+	openrouterKey := flag.String("openrouter-key", "", "OpenRouter API key (env: OPENROUTER_API_KEY)")
 	telegramToken := flag.String("telegram-token", "", "Telegram bot token (env: TELEGRAM_BOT_TOKEN)")
 	telegramChatID := flag.String("telegram-chat-id", "", "Telegram chat ID for HITL (env: TELEGRAM_CHAT_ID)")
 	hitlTimeout := flag.Duration("hitl-timeout", 1*time.Hour, "HITL decision timeout")
@@ -78,6 +79,9 @@ func main() {
 	}
 	if *sambaKey == "" {
 		*sambaKey = os.Getenv("SAMBA_API_KEY")
+	}
+	if *openrouterKey == "" {
+		*openrouterKey = os.Getenv("OPENROUTER_API_KEY")
 	}
 
 	// Setup structured logging
@@ -188,9 +192,9 @@ func main() {
 		logger.Info("LLM provider added", "name", "gemini", "model", "gemini-2.5-flash")
 	}
 	if *cerebrasKey != "" {
-		providers = append(providers, llm.NewOpenAICompatProvider("cerebras", "https://api.cerebras.ai/v1", *cerebrasKey, "qwen3-235b"))
+		providers = append(providers, llm.NewOpenAICompatProvider("cerebras", "https://api.cerebras.ai/v1", *cerebrasKey, "qwen-3-235b-a22b-instruct-2507"))
 		quotas = append(quotas, cost.ProviderQuota{Name: "cerebras", DailyRequests: 200})
-		logger.Info("LLM provider added", "name", "cerebras", "model", "qwen3-235b")
+		logger.Info("LLM provider added", "name", "cerebras", "model", "qwen-3-235b-a22b")
 	}
 	if *groqKey != "" {
 		providers = append(providers, llm.NewOpenAICompatProvider("groq", "https://api.groq.com/openai/v1", *groqKey, "llama-3.3-70b-versatile"))
@@ -198,13 +202,18 @@ func main() {
 		logger.Info("LLM provider added", "name", "groq", "model", "llama-3.3-70b")
 	}
 	if *sambaKey != "" {
-		providers = append(providers, llm.NewOpenAICompatProvider("sambanova", "https://api.sambanova.ai/v1", *sambaKey, "Meta-Llama-3.1-70B-Instruct"))
+		providers = append(providers, llm.NewOpenAICompatProvider("sambanova", "https://api.sambanova.ai/v1", *sambaKey, "Meta-Llama-3.3-70B-Instruct"))
 		quotas = append(quotas, cost.ProviderQuota{Name: "sambanova", DailyRequests: 200})
-		logger.Info("LLM provider added", "name", "sambanova", "model", "Meta-Llama-3.1-70B")
+		logger.Info("LLM provider added", "name", "sambanova", "model", "Meta-Llama-3.3-70B")
+	}
+	if *openrouterKey != "" {
+		providers = append(providers, llm.NewOpenAICompatProvider("openrouter", "https://openrouter.ai/api/v1", *openrouterKey, "meta-llama/llama-3.3-70b-instruct:free"))
+		quotas = append(quotas, cost.ProviderQuota{Name: "openrouter", DailyRequests: 200})
+		logger.Info("LLM provider added", "name", "openrouter", "model", "llama-3.3-70b-instruct:free")
 	}
 
 	if len(providers) == 0 {
-		logger.Error("no LLM providers configured — provide at least one API key (--gemini-key, --cerebras-key, --groq-key, --samba-key or env vars)")
+		logger.Error("no LLM providers configured — provide at least one API key (--gemini-key, --cerebras-key, --groq-key, --samba-key, --openrouter-key or env vars)")
 		os.Exit(1)
 	}
 
