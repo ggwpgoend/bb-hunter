@@ -14,11 +14,14 @@ import (
 
 	"github.com/ggwpgoend/bb-hunter/internal/analyst"
 	"github.com/ggwpgoend/bb-hunter/internal/audit"
+	"github.com/ggwpgoend/bb-hunter/internal/chainer"
 	"github.com/ggwpgoend/bb-hunter/internal/config"
 	"github.com/ggwpgoend/bb-hunter/internal/cost"
 	"github.com/ggwpgoend/bb-hunter/internal/db"
+	"github.com/ggwpgoend/bb-hunter/internal/dedup"
 	"github.com/ggwpgoend/bb-hunter/internal/differ"
 	"github.com/ggwpgoend/bb-hunter/internal/exploiter"
+	"github.com/ggwpgoend/bb-hunter/internal/gate"
 	"github.com/ggwpgoend/bb-hunter/internal/historian"
 	"github.com/ggwpgoend/bb-hunter/internal/hitl"
 	"github.com/ggwpgoend/bb-hunter/internal/llm"
@@ -222,6 +225,9 @@ func main() {
 	reporterAgent := reporter.NewReporter(llmClient, sf.Platform, logger)
 	historian := historian.NewHistorian(llmClient, logger)
 	exploiterAgent := exploiter.NewExploiter(llmClient, logger)
+	chainBuilder := chainer.NewChainer(llmClient, logger)
+	qualityGate := gate.NewGate(llmClient, logger)
+	dupChecker := dedup.NewChecker(writer.GetDB(), logger)
 
 	// Initialize differ
 	diffEngine := differ.New(writer.GetDB())
@@ -409,7 +415,116 @@ func main() {
 		logger.Info("first scan for program — no diff available")
 	}
 
-	// Stage 5: Exploiter + Verifier (optional)
+	// Stage 5a: Duplicate Detection
+	if ctx.Err() != nil {
+		return
+	}
+
+	logger.Info("running duplicate detection", "findings", len(reported))
+	dedupResults, _ := dupChecker.CheckBatch(reported)
+	var dedupFiltered []*models.Finding
+	for i, dr := range dedupResults {
+		switch dr.Verdict {
+		case dedup.VerdictConfirmed:
+			reported[i].Status = models.StatusDuplicate
+			writer.WriteFinding(ctx, reported[i])
+			auditLogger.Log(ctx, "dedup_confirmed", "dedup", map[string]string{
+				"finding_id": dr.FindingID,
+				"matched_id": dr.MatchedID,
+				"reason":     dr.Reason,
+			})
+			logger.Info("duplicate detected — skipping", "finding_id", dr.FindingID, "matched", dr.MatchedID)
+		case dedup.VerdictLikely:
+			logger.Warn("possible duplicate — keeping with warning",
+				"finding_id", dr.FindingID,
+				"matched_id", dr.MatchedID,
+				"similarity", dr.Similarity,
+			)
+			dedupFiltered = append(dedupFiltered, reported[i])
+		default:
+			dedupFiltered = append(dedupFiltered, reported[i])
+		}
+	}
+	logger.Info("dedup complete", "before", len(reported), "after", len(dedupFiltered))
+
+	// Stage 5b: 7-Question Gate
+	if ctx.Err() != nil {
+		return
+	}
+
+	logger.Info("running 7-Question Gate", "findings", len(dedupFiltered))
+	var gateFiltered []*models.Finding
+	gateResults, _ := qualityGate.EvaluateBatch(ctx, dedupFiltered)
+	for i, gr := range gateResults {
+		switch gr.Verdict {
+		case gate.VerdictKill:
+			logger.Info("gate: KILL — dropping finding",
+				"finding_id", gr.FindingID,
+				"score", gr.Score,
+				"reason", gr.Reasoning,
+			)
+			auditLogger.Log(ctx, "gate_kill", "gate", map[string]string{
+				"finding_id": gr.FindingID,
+				"score":      fmt.Sprintf("%d/7", gr.Score),
+				"reason":     gr.Reasoning,
+			})
+		case gate.VerdictDowngrade:
+			logger.Info("gate: DOWNGRADE — reducing severity",
+				"finding_id", gr.FindingID,
+				"score", gr.Score,
+				"suggested_severity", gr.SuggestedSeverity,
+			)
+			if gr.SuggestedSeverity != "" {
+				dedupFiltered[i].Severity = models.Severity(gr.SuggestedSeverity)
+				writer.WriteFinding(ctx, dedupFiltered[i])
+			}
+			gateFiltered = append(gateFiltered, dedupFiltered[i])
+		default: // PASS
+			gateFiltered = append(gateFiltered, dedupFiltered[i])
+		}
+	}
+	logger.Info("gate complete", "before", len(dedupFiltered), "after", len(gateFiltered))
+
+	// Stage 5c: Exploit Chain Builder
+	if ctx.Err() != nil {
+		return
+	}
+
+	if len(gateFiltered) >= 2 {
+		logger.Info("running exploit chain analysis", "findings", len(gateFiltered))
+		chains, chainErr := chainBuilder.FindChains(ctx, gateFiltered)
+		if chainErr != nil {
+			logger.Warn("chain analysis failed", "error", chainErr)
+		} else if len(chains) > 0 {
+			logger.Info("exploit chains found", "count", len(chains))
+			for _, ch := range chains {
+				logger.Info("chain",
+					"name", ch.Name,
+					"severity", ch.Severity,
+					"confidence", ch.Confidence,
+					"steps", len(ch.Steps),
+				)
+				auditLogger.Log(ctx, "exploit_chain", "chainer", map[string]string{
+					"chain_id":   ch.ID,
+					"name":       ch.Name,
+					"severity":   ch.Severity,
+					"confidence": fmt.Sprintf("%.2f", ch.Confidence),
+				})
+
+				// Print chain to stdout
+				fmt.Fprintf(os.Stdout, "\n===== EXPLOIT CHAIN: %s =====\n", ch.Name)
+				fmt.Fprintf(os.Stdout, "Severity: %s | Confidence: %.0f%%\n", ch.Severity, ch.Confidence*100)
+				fmt.Fprintf(os.Stdout, "Impact: %s\n", ch.Impact)
+				for _, step := range ch.Steps {
+					fmt.Fprintf(os.Stdout, "  Step %d: [%s] %s — %s\n", step.Order, step.VulnClass, step.URL, step.Action)
+				}
+			}
+		} else {
+			logger.Info("no exploit chains found")
+		}
+	}
+
+	// Stage 5d: Exploiter + Verifier (optional)
 	if ctx.Err() != nil {
 		return
 	}
@@ -452,7 +567,8 @@ func main() {
 		}
 	}
 
-	// Stage 6: HITL — send to Telegram for human review
+	// Stage 6: HITL — send to Telegram for human review (use gate-filtered list)
+	reported = gateFiltered // replace reported with gate-filtered for HITL
 	var approved []*models.Finding
 	if *telegramToken != "" && *telegramChatID != "" {
 		chatID, parseErr := strconv.ParseInt(*telegramChatID, 10, 64)
@@ -535,6 +651,7 @@ func main() {
 	fmt.Fprintf(os.Stderr, "Analyzed:        %d\n", len(analyzed))
 	fmt.Fprintf(os.Stderr, "Reports:         %d\n", len(reported))
 	fmt.Fprintf(os.Stderr, "Approved:        %d\n", len(approved))
+	fmt.Fprintf(os.Stderr, "Gate filtered:   %d\n", len(gateFiltered))
 	fmt.Fprintf(os.Stderr, "Exploiter:       %v\n", *enableExploiter)
 	fmt.Fprintf(os.Stderr, "====================\n")
 

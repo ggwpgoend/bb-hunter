@@ -52,6 +52,9 @@ internal/
   scheduler/           — Cron-like scan scheduler (interval/daily/weekly)
   sandbox/             — Rootless Docker sandbox for PoC execution
   exploiter/           — LLM-based PoC generator + Verifier (P0 #3, #4)
+  dedup/               — Duplicate finding detection (exact key + similarity)
+  gate/                — 7-Question Gate quality validator (LLM + algorithmic)
+  chainer/             — Exploit chain builder (12 patterns + LLM discovery)
 ```
 
 ## Security
@@ -93,3 +96,11 @@ internal/
 - [x] P0 #3 fix — PoC test-payload determinism
 - [x] P0 #4 fix — Verifier raw-finding leak prevention
 - [x] Pipeline wiring — full 6-stage pipeline in main.go
+
+## Phase 3a Status
+
+- [x] Duplicate Detection — exact key match + similarity-based dedup
+- [x] 7-Question Gate — LLM + algorithmic quality validation (PASS/KILL/DOWNGRADE)
+- [x] Nuclei -ai integration — dynamic AI-generated nuclei templates
+- [x] Exploit Chain Builder — 12 known patterns + LLM creative chain discovery
+- [x] Pipeline wiring — dedup → gate → chainer stages in main.go
