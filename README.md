@@ -55,6 +55,10 @@ internal/
   dedup/               — Duplicate finding detection (exact key + similarity)
   gate/                — 7-Question Gate quality validator (LLM + algorithmic)
   chainer/             — Exploit chain builder (12 patterns + LLM discovery)
+  browser/             — Browser PoC engine (agent-browser: XSS, CSRF, clickjacking)
+scripts/
+  install-kali.sh      — Полная установка на Kali Linux (Go, recon, Docker, agent-browser)
+  run.sh               — Запуск с проверкой зависимостей
 ```
 
 ## Security
@@ -104,3 +108,10 @@ internal/
 - [x] Nuclei -ai integration — dynamic AI-generated nuclei templates
 - [x] Exploit Chain Builder — 12 known patterns + LLM creative chain discovery
 - [x] Pipeline wiring — dedup → gate → chainer stages in main.go
+
+## Phase 3b Status
+
+- [x] Browser PoC engine — agent-browser integration (XSS, CSRF, open redirect, clickjacking, info disclosure)
+- [x] Browser wiring in pipeline — `--browser-poc` flag, screenshot evidence
+- [x] Kali install script — `scripts/install-kali.sh` (полная автоустановка)
+- [x] Run script — `scripts/run.sh` (проверка зависимостей, .env, scope)
