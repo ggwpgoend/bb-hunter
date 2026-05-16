@@ -120,6 +120,57 @@ func (c *Client) Complete(ctx context.Context, req *Request) (*Response, error) 
 	return nil, ErrAllFailed
 }
 
+// HealthResult contains the result of a provider health check.
+type HealthResult struct {
+	Provider  string        `json:"provider"`
+	Model     string        `json:"model"`
+	OK        bool          `json:"ok"`
+	Latency   time.Duration `json:"latency"`
+	Error     string        `json:"error,omitempty"`
+}
+
+// CheckHealth sends a minimal request to each configured provider
+// and returns the results. Useful for verifying connectivity and quotas.
+func (c *Client) CheckHealth(ctx context.Context) []HealthResult {
+	var results []HealthResult
+	for _, p := range c.providers {
+		hr := HealthResult{
+			Provider: p.Name(),
+			Model:    p.Model(),
+		}
+
+		if !p.Available() {
+			hr.Error = "rate limited"
+			results = append(results, hr)
+			continue
+		}
+
+		checkCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		req := &Request{
+			Messages:    []Message{{Role: RoleUser, Content: "Reply with exactly: ok"}},
+			MaxTokens:   4,
+			Temperature: 0,
+		}
+
+		resp, err := p.Complete(checkCtx, req)
+		cancel()
+
+		if err != nil {
+			hr.Error = err.Error()
+		} else {
+			hr.OK = true
+			hr.Latency = resp.Latency
+		}
+		results = append(results, hr)
+	}
+	return results
+}
+
+// Providers returns the list of configured providers (read-only info).
+func (c *Client) Providers() []Provider {
+	return c.providers
+}
+
 // ActivateKillSwitch stops all LLM calls immediately.
 func (c *Client) ActivateKillSwitch() {
 	c.killSwitch = true

@@ -55,6 +55,7 @@ func main() {
 	screenshotDir := flag.String("screenshot-dir", "screenshots", "directory for browser PoC screenshots")
 	ratePerSecond := flag.Float64("rate", 10, "requests per second to target")
 	dryRun := flag.Bool("dry-run", false, "parse scope and validate config without scanning")
+	checkLLM := flag.Bool("check-llm", false, "check LLM provider availability and exit")
 	flag.Parse()
 
 	// Fallback to env vars for Telegram config
@@ -207,6 +208,40 @@ func main() {
 		os.Exit(1)
 	}
 
+	// --check-llm: verify provider connectivity and exit
+	if *checkLLM {
+		tmpClient, _ := llm.NewClient(providers...)
+		fmt.Println("🔍 Checking LLM provider availability...")
+		fmt.Println()
+		results := tmpClient.CheckHealth(ctx)
+		allOK := true
+		for _, r := range results {
+			if r.OK {
+				fmt.Printf("  ✅ %-12s %-30s %s\n", r.Provider, r.Model, r.Latency.Round(time.Millisecond))
+			} else {
+				allOK = false
+				errMsg := r.Error
+				if len(errMsg) > 80 {
+					errMsg = errMsg[:80] + "..."
+				}
+				fmt.Printf("  ❌ %-12s %-30s %s\n", r.Provider, r.Model, errMsg)
+			}
+		}
+		fmt.Println()
+		if allOK {
+			fmt.Printf("All %d providers available.\n", len(results))
+		} else {
+			okCount := 0
+			for _, r := range results {
+				if r.OK {
+					okCount++
+				}
+			}
+			fmt.Printf("%d/%d providers available.\n", okCount, len(results))
+		}
+		os.Exit(0)
+	}
+
 	// Initialize cost tracker
 	tracker := cost.NewTracker(quotas, logger)
 	tracker.OnKillSwitch = func() {
@@ -222,6 +257,35 @@ func main() {
 		logger.Error("failed to create LLM client", "error", err)
 		os.Exit(1)
 	}
+
+	// Startup health check: verify at least one LLM provider is reachable
+	logger.Info("checking LLM provider availability...")
+	healthResults := llmClient.CheckHealth(ctx)
+	availableCount := 0
+	for _, hr := range healthResults {
+		if hr.OK {
+			availableCount++
+			logger.Info("LLM provider available",
+				"provider", hr.Provider,
+				"model", hr.Model,
+				"latency", hr.Latency.Round(time.Millisecond),
+			)
+		} else {
+			logger.Warn("LLM provider unavailable",
+				"provider", hr.Provider,
+				"model", hr.Model,
+				"error", hr.Error,
+			)
+		}
+	}
+	if availableCount == 0 {
+		logger.Error("no LLM providers are reachable — check API keys, network, and VPN")
+		os.Exit(1)
+	}
+	logger.Info("LLM health check complete",
+		"available", availableCount,
+		"total", len(healthResults),
+	)
 
 	// Initialize agents
 	analystAgent := analyst.NewAnalyst(llmClient, enforcer, logger)
