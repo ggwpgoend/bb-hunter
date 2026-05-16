@@ -14,6 +14,7 @@ import (
 
 	"github.com/ggwpgoend/bb-hunter/internal/analyst"
 	"github.com/ggwpgoend/bb-hunter/internal/audit"
+	"github.com/ggwpgoend/bb-hunter/internal/browser"
 	"github.com/ggwpgoend/bb-hunter/internal/chainer"
 	"github.com/ggwpgoend/bb-hunter/internal/config"
 	"github.com/ggwpgoend/bb-hunter/internal/cost"
@@ -50,6 +51,8 @@ func main() {
 	sandboxMemory := flag.String("sandbox-memory", "256m", "sandbox memory limit")
 	sandboxTimeout := flag.Duration("sandbox-timeout", 30*time.Second, "sandbox execution timeout")
 	enableExploiter := flag.Bool("exploit", false, "enable Exploiter+Verifier (requires Docker)")
+	enableBrowser := flag.Bool("browser-poc", false, "enable browser-based PoC evidence (requires agent-browser)")
+	screenshotDir := flag.String("screenshot-dir", "screenshots", "directory for browser PoC screenshots")
 	ratePerSecond := flag.Float64("rate", 10, "requests per second to target")
 	dryRun := flag.Bool("dry-run", false, "parse scope and validate config without scanning")
 	flag.Parse()
@@ -564,6 +567,75 @@ func main() {
 			} else {
 				logger.Info("PoC not verified", "finding_id", f.ID, "evidence", result.Evidence)
 			}
+		}
+	}
+
+	// Stage 5e: Browser PoC evidence (optional)
+	if ctx.Err() != nil {
+		return
+	}
+
+	if *enableBrowser {
+		browserEngine := browser.NewEngine(browser.Config{
+			ProxyAddr:     "http://" + *proxyAddr,
+			ScreenshotDir: *screenshotDir,
+			Logger:        logger,
+		})
+
+		if browserEngine.Available() {
+			logger.Info("running browser PoC evidence", "findings", len(gateFiltered))
+			browserVulnClasses := map[string]bool{
+				"xss": true, "csrf": true, "open_redirect": true,
+				"clickjacking": true, "info_disclosure": true,
+			}
+
+			var browserInputs []browser.FindingInput
+			for _, f := range gateFiltered {
+				if browserVulnClasses[string(f.VulnClass)] {
+					browserInputs = append(browserInputs, browser.FindingInput{
+						FindingID: f.ID,
+						VulnClass: string(f.VulnClass),
+						URL:       f.URL,
+						Params:    f.ParamNames,
+					})
+				}
+			}
+
+			if len(browserInputs) > 0 {
+				evidences := browserEngine.BatchEvidence(ctx, browserInputs)
+				for _, ev := range evidences {
+					if ev.Verified {
+						logger.Info("browser PoC VERIFIED",
+							"finding_id", ev.FindingID,
+							"vuln_class", ev.VulnClass,
+							"description", ev.Description,
+							"screenshots", len(ev.Screenshots),
+						)
+						fmt.Fprintf(os.Stdout, "\n===== BROWSER PoC: %s =====\n", ev.FindingID)
+						fmt.Fprintf(os.Stdout, "Vuln: %s | URL: %s\n", ev.VulnClass, ev.URL)
+						fmt.Fprintf(os.Stdout, "Description: %s\n", ev.Description)
+						for _, s := range ev.Screenshots {
+							fmt.Fprintf(os.Stdout, "Screenshot: %s\n", s)
+						}
+					} else {
+						logger.Info("browser PoC not verified",
+							"finding_id", ev.FindingID,
+							"error", ev.Error,
+						)
+					}
+
+					auditLogger.Log(ctx, "browser_poc", "browser", map[string]string{
+						"finding_id": ev.FindingID,
+						"vuln_class": ev.VulnClass,
+						"verified":   fmt.Sprintf("%t", ev.Verified),
+						"duration":   ev.Duration.String(),
+					})
+				}
+			}
+
+			browserEngine.Close(ctx)
+		} else {
+			logger.Warn("browser PoC skipped: agent-browser not available")
 		}
 	}
 
