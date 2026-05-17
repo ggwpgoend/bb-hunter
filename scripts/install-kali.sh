@@ -17,7 +17,6 @@ info()  { echo -e "${BLUE}[*]${NC} $1"; }
 
 INSTALL_DIR="${INSTALL_DIR:-$HOME/bb-hunter}"
 GO_VERSION="1.24.3"
-AGENT_BROWSER_VERSION="latest"
 
 # ============================================================
 # 1. Проверка системы

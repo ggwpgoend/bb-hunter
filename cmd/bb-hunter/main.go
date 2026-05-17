@@ -32,7 +32,9 @@ import (
 	"github.com/ggwpgoend/bb-hunter/internal/reporter"
 	"github.com/ggwpgoend/bb-hunter/internal/sandbox"
 	"github.com/ggwpgoend/bb-hunter/internal/scanner"
+	"github.com/ggwpgoend/bb-hunter/internal/scheduler"
 	"github.com/ggwpgoend/bb-hunter/internal/scope"
+	"github.com/ggwpgoend/bb-hunter/internal/submit"
 )
 
 func main() {
@@ -327,8 +329,8 @@ func main() {
 		}
 	}
 
-	// Initialize scanner pipeline
-	pipeline := scanner.NewPipeline(scanner.PipelineConfig{
+	// Initialize scanner pipeline config
+	pipelineCfg := scanner.PipelineConfig{
 		Domains:        sf.Domains,
 		ProxyAddr:      "http://" + *proxyAddr,
 		RateLimit:      *ratePerSecond,
@@ -336,29 +338,47 @@ func main() {
 		KatanaDepth:    3,
 		Tools:          scanner.DefaultToolPaths(),
 		Logger:         logger,
-	})
-	orchestrator := scanner.NewOrchestrator(pipeline, sf.Program, logger)
+	}
 
 	// Log pipeline start
 	auditLogger.Log(ctx, "scan_started", "scanner", map[string]string{
-		"domains": strings.Join(sf.Domains, ","),
-		"rate":    fmt.Sprintf("%.0f", *ratePerSecond),
+		"domains":  strings.Join(sf.Domains, ","),
+		"rate":     fmt.Sprintf("%.0f", *ratePerSecond),
+		"parallel": fmt.Sprintf("%d", *parallelWorkers),
+		"monitor":  fmt.Sprintf("%t", *monitorMode),
 	})
 
 	logger.Info("starting scan pipeline",
 		"domains", sf.Domains,
 		"rate", *ratePerSecond,
 		"providers", len(providers),
+		"parallel", *parallelWorkers,
+		"monitor", *monitorMode,
 	)
 
 	// === PIPELINE: scan → analyze → report ===
 
-	// Stage 1: Run scanner
-	scanResult, err := orchestrator.RunFull(ctx)
-	if err != nil {
-		logger.Error("scan failed", "error", err)
-		auditLogger.Log(ctx, "scan_failed", "scanner", map[string]string{"error": err.Error()})
-		os.Exit(1)
+	// Stage 1: Run scanner (sequential or parallel)
+	var scanResult *scanner.ScanResult
+	if *parallelWorkers > 0 {
+		po := scanner.NewParallelOrchestrator(pipelineCfg, sf.Program, *parallelWorkers, logger)
+		domainResults, parallelErr := po.RunParallel(ctx)
+		if parallelErr != nil {
+			logger.Error("parallel scan failed", "error", parallelErr)
+			auditLogger.Log(ctx, "scan_failed", "scanner", map[string]string{"error": parallelErr.Error()})
+			os.Exit(1)
+		}
+		scanResult = scanner.MergeResults(domainResults, sf.Program)
+	} else {
+		pipeline := scanner.NewPipeline(pipelineCfg)
+		orchestrator := scanner.NewOrchestrator(pipeline, sf.Program, logger)
+		var scanErr error
+		scanResult, scanErr = orchestrator.RunFull(ctx)
+		if scanErr != nil {
+			logger.Error("scan failed", "error", scanErr)
+			auditLogger.Log(ctx, "scan_failed", "scanner", map[string]string{"error": scanErr.Error()})
+			os.Exit(1)
+		}
 	}
 
 	auditLogger.Log(ctx, "scan_completed", "scanner", map[string]string{
@@ -788,6 +808,30 @@ func main() {
 		approved = reported
 	}
 
+	// Stage 7: Auto-submit approved findings to platform (stub)
+	if *autoSubmit && len(approved) > 0 {
+		var submitter submit.Submitter
+		switch sf.Platform {
+		case "bizone":
+			submitter = submit.NewBizoneSubmitter("", "", logger)
+		default:
+			submitter = submit.NewStandoffSubmitter("", "", logger)
+		}
+
+		logger.Info("auto-submitting approved findings",
+			"count", len(approved),
+			"platform", submitter.Name(),
+		)
+		submitResults := submit.BatchSubmit(ctx, submitter, approved, logger)
+		for _, sr := range submitResults {
+			auditLogger.Log(ctx, "finding_submitted", "submit", map[string]string{
+				"finding_id": sr.FindingID,
+				"platform":   sr.Platform,
+				"success":    fmt.Sprintf("%t", sr.Success),
+			})
+		}
+	}
+
 	// Final summary
 	fmt.Fprintf(os.Stderr, "\n=== Scan Complete ===\n")
 	fmt.Fprintf(os.Stderr, "Hosts scanned:   %d\n", scanResult.Run.HostsScanned)
@@ -798,6 +842,7 @@ func main() {
 	fmt.Fprintf(os.Stderr, "Approved:        %d\n", len(approved))
 	fmt.Fprintf(os.Stderr, "Gate filtered:   %d\n", len(gateFiltered))
 	fmt.Fprintf(os.Stderr, "Exploiter:       %v\n", *enableExploiter)
+	fmt.Fprintf(os.Stderr, "Auto-submit:     %v\n", *autoSubmit)
 	fmt.Fprintf(os.Stderr, "====================\n")
 
 	auditLogger.Log(ctx, "pipeline_completed", "system", map[string]string{
@@ -813,6 +858,67 @@ func main() {
 		logger.Error("audit log integrity check FAILED", "error", err)
 	} else {
 		logger.Info("audit log integrity verified", "entries", count)
+	}
+
+	// Continuous monitoring mode
+	if *monitorMode {
+		logger.Info("entering continuous monitoring mode",
+			"interval", monitorInterval.String(),
+		)
+		fmt.Fprintf(os.Stderr, "\n=== Monitor Mode ===\n")
+		fmt.Fprintf(os.Stderr, "Interval: %s\n", monitorInterval.String())
+		fmt.Fprintf(os.Stderr, "Press Ctrl+C to stop.\n\n")
+
+		monSched := scheduler.New([]scheduler.Schedule{
+			{
+				ProgramID: sf.Program,
+				Type:      scheduler.ScheduleInterval,
+				Interval:  *monitorInterval,
+				RunType:   "delta",
+				Enabled:   true,
+			},
+		}, func(sctx context.Context, programID, runType string) error {
+			logger.Info("monitor: starting scheduled scan",
+				"program", programID,
+				"run_type", runType,
+			)
+			auditLogger.Log(sctx, "monitor_scan_started", "scheduler", map[string]string{
+				"program":  programID,
+				"run_type": runType,
+			})
+
+			var monResult *scanner.ScanResult
+			if *parallelWorkers > 0 {
+				po := scanner.NewParallelOrchestrator(pipelineCfg, programID, *parallelWorkers, logger)
+				dr, pErr := po.RunParallel(sctx)
+				if pErr != nil {
+					return pErr
+				}
+				monResult = scanner.MergeResults(dr, programID)
+			} else {
+				p := scanner.NewPipeline(pipelineCfg)
+				o := scanner.NewOrchestrator(p, programID, logger)
+				var sErr error
+				monResult, sErr = o.RunFull(sctx)
+				if sErr != nil {
+					return sErr
+				}
+			}
+
+			writer.WriteScanRun(sctx, monResult.Run)
+			logger.Info("monitor: scan complete",
+				"findings", monResult.Run.FindingsTotal,
+				"hosts", monResult.Run.HostsScanned,
+			)
+
+			auditLogger.Log(sctx, "monitor_scan_completed", "scheduler", map[string]string{
+				"findings": fmt.Sprintf("%d", monResult.Run.FindingsTotal),
+			})
+
+			return nil
+		}, logger)
+
+		monSched.Start(ctx) // blocks until ctx is cancelled
 	}
 
 	// Graceful shutdown
