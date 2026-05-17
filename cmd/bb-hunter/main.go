@@ -59,10 +59,6 @@ func main() {
 	ratePerSecond := flag.Float64("rate", 10, "requests per second to target")
 	dryRun := flag.Bool("dry-run", false, "parse scope and validate config without scanning")
 	checkLLM := flag.Bool("check-llm", false, "check LLM provider availability and exit")
-	parallelWorkers := flag.Int("parallel", 0, "parallel scan workers (0 = sequential, N = N goroutines per domain group)")
-	monitorMode := flag.Bool("monitor", false, "enable continuous monitoring mode (re-scan on interval)")
-	monitorInterval := flag.Duration("monitor-interval", 6*time.Hour, "interval between monitor scans")
-	autoSubmit := flag.Bool("auto-submit", false, "auto-submit approved findings to platform API (stub)")
 	flag.Parse()
 
 	// Fallback to env vars for Telegram config
