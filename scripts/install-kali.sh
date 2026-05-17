@@ -120,31 +120,31 @@ nuclei -update-templates -silent 2>/dev/null || true
 # ============================================================
 # 5. agent-browser (для Browser PoC)
 # ============================================================
-log "Установка agent-browser..."
+log "Установка agent-browser (опционально, для --browser-poc)..."
 if command -v agent-browser &>/dev/null; then
     info "agent-browser уже установлен"
 else
+    AGENT_BROWSER_INSTALLED=0
     if command -v npm &>/dev/null; then
-        npm install -g agent-browser 2>/dev/null || {
-            warn "npm install agent-browser не удался, пробуем cargo"
-            if command -v cargo &>/dev/null; then
-                cargo install agent-browser 2>/dev/null || warn "cargo install тоже не удался"
-            else
-                warn "Для agent-browser нужен npm или cargo. Установите вручную: npm install -g agent-browser"
-            fi
+        timeout 120 npm install -g agent-browser 2>/dev/null && AGENT_BROWSER_INSTALLED=1 || {
+            warn "npm install agent-browser не удался или таймаут"
         }
-    elif command -v cargo &>/dev/null; then
-        cargo install agent-browser 2>/dev/null || warn "cargo install agent-browser не удался"
-    else
-        warn "Для agent-browser нужен npm или cargo"
-        warn "Установите Node.js: sudo apt install nodejs npm && npm install -g agent-browser"
+    fi
+    if [[ "$AGENT_BROWSER_INSTALLED" -eq 0 ]] && command -v cargo &>/dev/null; then
+        timeout 300 cargo install agent-browser 2>/dev/null && AGENT_BROWSER_INSTALLED=1 || {
+            warn "cargo install agent-browser не удался или таймаут"
+        }
+    fi
+    if [[ "$AGENT_BROWSER_INSTALLED" -eq 0 ]]; then
+        warn "agent-browser не установлен (опционально, нужен только для --browser-poc)"
+        warn "Установите вручную: npm install -g agent-browser"
     fi
 fi
 
 # Установить браузер для agent-browser
 if command -v agent-browser &>/dev/null; then
     log "Настройка браузера для agent-browser..."
-    agent-browser install --with-deps 2>/dev/null || true
+    timeout 120 agent-browser install --with-deps 2>/dev/null || warn "agent-browser install таймаут/ошибка (не критично)"
 fi
 
 # ============================================================
