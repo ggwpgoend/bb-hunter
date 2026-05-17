@@ -219,9 +219,9 @@ func (a *Agent) Run(ctx context.Context) ([]Finding, error) {
 		if a.cfg.MaxSteps > 0 && step > a.cfg.MaxSteps {
 			return false
 		}
-		// Graceful-stop window: once requested, allow up to StopGraceSteps
-		// more turns, then exit.
-		if stopInjectedAtStep > 0 && step > stopInjectedAtStep+StopGraceSteps {
+		// Graceful-stop window: once requested, allow exactly StopGraceSteps
+		// total turns starting with the injection turn, then exit.
+		if stopInjectedAtStep > 0 && step >= stopInjectedAtStep+StopGraceSteps {
 			return false
 		}
 		return true
