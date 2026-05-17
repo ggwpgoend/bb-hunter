@@ -55,10 +55,15 @@ type stageModelCfg struct {
 //   - exploiter: PoC code generation → coding models
 //   - agent:     autonomous bug hunting → best reasoning + tool use
 var stageDefaults = map[string]stageModelCfg{
+	// Canopy Wave available models per key:
+	//   Fast Bundle:   minimax/minimax-m2.5, xiaomimimo/mimo-v2.5
+	//   Unlimited 50M: minimax/minimax-m2.5, moonshotai/kimi-k2.6
+	// Speed-critical stages (analyst,gate,chainer,exploiter) use Fast key.
+	// Heavy stages (reporter,historian,agent) use Unlimited key.
 	"analyst": {
 		Samba:     "DeepSeek-V3.2",
 		FreeTheAI: "cat/claude-opus-4-7",
-		Canopy:    "deepseek/deepseek-v4-flash",
+		Canopy:    "minimax/minimax-m2.5",
 	},
 	"reporter": {
 		Samba:     "MiniMax-M2.7",
@@ -68,27 +73,27 @@ var stageDefaults = map[string]stageModelCfg{
 	"historian": {
 		Samba:     "gemma-3-12b-it",
 		FreeTheAI: "cat/gemini-3-flash",
-		Canopy:    "xiaomimimo/mimo-v2-flash",
+		Canopy:    "minimax/minimax-m2.5",
 	},
 	"gate": {
 		Samba:     "DeepSeek-V3.2",
 		FreeTheAI: "cat/claude-4-6-sonnet",
-		Canopy:    "deepseek/deepseek-v4-flash",
+		Canopy:    "minimax/minimax-m2.5",
 	},
 	"chainer": {
 		Samba:     "DeepSeek-V3.1",
 		FreeTheAI: "cat/gpt-5",
-		Canopy:    "zai/glm-5.1",
+		Canopy:    "xiaomimimo/mimo-v2.5",
 	},
 	"exploiter": {
 		Samba:     "DeepSeek-V3.2",
 		FreeTheAI: "bbg/deepseek-ai/DeepSeek-V4-Pro",
-		Canopy:    "deepseek/deepseek-v4-flash",
+		Canopy:    "xiaomimimo/mimo-v2.5",
 	},
 	"agent": {
 		Samba:     "DeepSeek-V3.2",
 		FreeTheAI: "cat/claude-opus-4-7",
-		Canopy:    "deepseek/deepseek-v4-flash",
+		Canopy:    "moonshotai/kimi-k2.6",
 	},
 }
 
@@ -123,7 +128,7 @@ func buildStageClient(stage, sambaKey, freetheaiKey, canopyKey, canopyFastKey st
 	}
 	if ck != "" {
 		providers = append(providers, llm.NewOpenAICompatProvider(
-			"canopy", "https://api.canopywave.io/v1", ck, cfg.Canopy))
+			"canopy", "https://inference.canopywave.io/v1", ck, cfg.Canopy))
 	}
 
 	if len(providers) == 0 {
@@ -161,7 +166,7 @@ func main() {
 	freetheaiModel := flag.String("freetheai-model", "cat/gemini-3-flash", "FreeTheAI model name (env: FREETHEAI_MODEL)")
 	canopywaveKey := flag.String("canopywave-key", "", "Canopy Wave API key — Unlimited plan (env: CANOPYWAVE_API_KEY)")
 	canopywaveFastKey := flag.String("canopywave-fast-key", "", "Canopy Wave API key — Fast Bundle (env: CANOPYWAVE_FAST_KEY)")
-	canopywaveModel := flag.String("canopywave-model", "deepseek/deepseek-v4-flash", "Canopy Wave model name (env: CANOPYWAVE_MODEL)")
+	canopywaveModel := flag.String("canopywave-model", "minimax/minimax-m2.5", "Canopy Wave model name (env: CANOPYWAVE_MODEL)")
 	telegramToken := flag.String("telegram-token", "", "Telegram bot token (env: TELEGRAM_BOT_TOKEN)")
 	telegramChatID := flag.String("telegram-chat-id", "", "Telegram chat ID for HITL (env: TELEGRAM_CHAT_ID)")
 	hitlTimeout := flag.Duration("hitl-timeout", 1*time.Hour, "HITL decision timeout")
@@ -230,7 +235,7 @@ func main() {
 	if *canopywaveKey == "" {
 		*canopywaveKey = os.Getenv("CANOPYWAVE_API_KEY")
 	}
-	if *canopywaveModel == "" || *canopywaveModel == "deepseek/deepseek-v4-flash" {
+	if *canopywaveModel == "" || *canopywaveModel == "minimax/minimax-m2.5" {
 		if env := os.Getenv("CANOPYWAVE_MODEL"); env != "" {
 			*canopywaveModel = env
 		}
@@ -401,12 +406,12 @@ func main() {
 		logger.Info("LLM provider added", "name", "freetheai", "model", *freetheaiModel)
 	}
 	if *canopywaveKey != "" {
-		providers = append(providers, llm.NewOpenAICompatProvider("canopywave", "https://api.canopywave.io/v1", *canopywaveKey, *canopywaveModel))
+		providers = append(providers, llm.NewOpenAICompatProvider("canopywave", "https://inference.canopywave.io/v1", *canopywaveKey, *canopywaveModel))
 		quotas = append(quotas, cost.ProviderQuota{Name: "canopywave", DailyRequests: 50000})
 		logger.Info("LLM provider added", "name", "canopywave", "model", *canopywaveModel, "plan", "unlimited")
 	}
 	if *canopywaveFastKey != "" {
-		providers = append(providers, llm.NewOpenAICompatProvider("canopywave-fast", "https://api.canopywave.io/v1", *canopywaveFastKey, *canopywaveModel))
+		providers = append(providers, llm.NewOpenAICompatProvider("canopywave-fast", "https://inference.canopywave.io/v1", *canopywaveFastKey, *canopywaveModel))
 		quotas = append(quotas, cost.ProviderQuota{Name: "canopywave-fast", DailyRequests: 50000})
 		logger.Info("LLM provider added", "name", "canopywave-fast", "model", *canopywaveModel, "plan", "fast-bundle")
 	}
