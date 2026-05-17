@@ -184,7 +184,7 @@ func (a *Agent) Run(ctx context.Context) ([]Finding, error) {
 		llmStart := time.Now()
 		resp, err := a.cfg.LLMClient.Complete(ctx, &llm.Request{
 			Messages:    a.history,
-			MaxTokens:   1024,
+			MaxTokens:   2048,
 			Temperature: 0.2,
 		})
 		if err != nil {
@@ -194,16 +194,17 @@ func (a *Agent) Run(ctx context.Context) ([]Finding, error) {
 			time.Sleep(10 * time.Second)
 			resp, err = a.cfg.LLMClient.Complete(ctx, &llm.Request{
 				Messages:    a.history,
-				MaxTokens:   1024,
+				MaxTokens:   2048,
 				Temperature: 0.2,
 			})
 			if err != nil {
-				// Second retry with even longer wait
-				a.display.Error(fmt.Sprintf("LLM retry failed: %v — retrying in 30s...", err))
+				// Second retry with even longer wait and trimmed context
+				a.display.Error(fmt.Sprintf("LLM retry failed: %v — trimming context and retrying in 30s...", err))
+				a.trimHistory()
 				time.Sleep(30 * time.Second)
 				resp, err = a.cfg.LLMClient.Complete(ctx, &llm.Request{
 					Messages:    a.history,
-					MaxTokens:   1024,
+					MaxTokens:   2048,
 					Temperature: 0.2,
 				})
 				if err != nil {
@@ -273,10 +274,14 @@ func (a *Agent) Run(ctx context.Context) ([]Finding, error) {
 			}
 		}
 
-		// Add observation to history
+		// Add observation to history (truncate very long observations to save context)
+		obs := observation
+		if len(obs) > 3000 {
+			obs = obs[:2800] + "\n... [truncated, " + fmt.Sprintf("%d", len(observation)-2800) + " chars omitted]"
+		}
 		a.history = append(a.history, llm.Message{
 			Role:    llm.RoleUser,
-			Content: fmt.Sprintf("OBSERVATION: %s", observation),
+			Content: fmt.Sprintf("OBSERVATION: %s", obs),
 		})
 
 		// Trim history if too long (keep system + last N messages)
@@ -342,8 +347,16 @@ func parseResponse(content string) (think, tool, args string) {
 }
 
 // trimHistory keeps conversation manageable by removing old messages.
+// Also truncates individual long messages to reduce total context size.
 func (a *Agent) trimHistory() {
-	maxMessages := 30
+	// First pass: truncate any remaining oversized messages
+	for i := 2; i < len(a.history); i++ {
+		if len(a.history[i].Content) > 2000 {
+			a.history[i].Content = a.history[i].Content[:1800] + "\n... [trimmed]"
+		}
+	}
+
+	maxMessages := 24
 	if len(a.history) <= maxMessages {
 		return
 	}

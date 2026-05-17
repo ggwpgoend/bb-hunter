@@ -148,6 +148,16 @@ func (o *OpenAICompatProvider) Complete(ctx context.Context, req *Request) (*Res
 		return nil, fmt.Errorf("%w: %s: %s", ErrRateLimited, o.name, string(respBody))
 	}
 
+	if httpResp.StatusCode == 400 {
+		// 400 often means context too large or invalid payload — mark as temporarily unavailable
+		// so round-robin moves to the next provider
+		o.mu.Lock()
+		o.rateLimited = true
+		o.retryAfter = time.Now().Add(60 * time.Second)
+		o.mu.Unlock()
+		return nil, fmt.Errorf("%s: HTTP %d: %s", o.name, httpResp.StatusCode, string(respBody))
+	}
+
 	if httpResp.StatusCode != 200 {
 		return nil, fmt.Errorf("%s: HTTP %d: %s", o.name, httpResp.StatusCode, string(respBody))
 	}
