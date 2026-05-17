@@ -54,6 +54,8 @@ func main() {
 	chutesKey := flag.String("chutes-key", "", "Chutes AI API key (env: CHUTES_API_KEY)")
 	freetheaiKey := flag.String("freetheai-key", "", "FreeTheAI API key (env: FREETHEAI_API_KEY)")
 	freetheaiModel := flag.String("freetheai-model", "cat/gemini-3-flash", "FreeTheAI model name (env: FREETHEAI_MODEL)")
+	canopywaveKey := flag.String("canopywave-key", "", "Canopy Wave API key (env: CANOPYWAVE_API_KEY)")
+	canopywaveModel := flag.String("canopywave-model", "deepseek/deepseek-chat-v3.1", "Canopy Wave model name (env: CANOPYWAVE_MODEL)")
 	telegramToken := flag.String("telegram-token", "", "Telegram bot token (env: TELEGRAM_BOT_TOKEN)")
 	telegramChatID := flag.String("telegram-chat-id", "", "Telegram chat ID for HITL (env: TELEGRAM_CHAT_ID)")
 	hitlTimeout := flag.Duration("hitl-timeout", 1*time.Hour, "HITL decision timeout")
@@ -117,6 +119,14 @@ func main() {
 	if *freetheaiModel == "" || *freetheaiModel == "cat/gemini-3-flash" {
 		if env := os.Getenv("FREETHEAI_MODEL"); env != "" {
 			*freetheaiModel = env
+		}
+	}
+	if *canopywaveKey == "" {
+		*canopywaveKey = os.Getenv("CANOPYWAVE_API_KEY")
+	}
+	if *canopywaveModel == "" || *canopywaveModel == "deepseek/deepseek-chat-v3.1" {
+		if env := os.Getenv("CANOPYWAVE_MODEL"); env != "" {
+			*canopywaveModel = env
 		}
 	}
 
@@ -277,9 +287,14 @@ func main() {
 		quotas = append(quotas, cost.ProviderQuota{Name: "freetheai", DailyRequests: 10000})
 		logger.Info("LLM provider added", "name", "freetheai", "model", *freetheaiModel)
 	}
+	if *canopywaveKey != "" {
+		providers = append(providers, llm.NewOpenAICompatProvider("canopywave", "https://inference.canopywave.io/v1", *canopywaveKey, *canopywaveModel))
+		quotas = append(quotas, cost.ProviderQuota{Name: "canopywave", DailyRequests: 50000})
+		logger.Info("LLM provider added", "name", "canopywave", "model", *canopywaveModel)
+	}
 
 	if len(providers) == 0 {
-		logger.Error("no LLM providers configured — provide at least one API key (--gemini-key, --cerebras-key, --groq-key, --samba-key, --openrouter-key, --together-key, --nvidia-key, --glhf-key, --chutes-key, --freetheai-key or env vars)")
+		logger.Error("no LLM providers configured — provide at least one API key (--gemini-key, --cerebras-key, --groq-key, --samba-key, --openrouter-key, --together-key, --nvidia-key, --glhf-key, --chutes-key, --freetheai-key, --canopywave-key or env vars)")
 		os.Exit(1)
 	}
 
