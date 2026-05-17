@@ -48,6 +48,10 @@ func main() {
 	groqKey := flag.String("groq-key", "", "Groq API key (env: GROQ_API_KEY)")
 	sambaKey := flag.String("samba-key", "", "SambaNova API key (env: SAMBA_API_KEY)")
 	openrouterKey := flag.String("openrouter-key", "", "OpenRouter API key (env: OPENROUTER_API_KEY)")
+	togetherKey := flag.String("together-key", "", "Together AI API key (env: TOGETHER_API_KEY)")
+	nvidiaNimKey := flag.String("nvidia-key", "", "NVIDIA NIM API key (env: NVIDIA_API_KEY)")
+	glhfKey := flag.String("glhf-key", "", "GLHF.chat API key (env: GLHF_API_KEY)")
+	chutesKey := flag.String("chutes-key", "", "Chutes AI API key (env: CHUTES_API_KEY)")
 	telegramToken := flag.String("telegram-token", "", "Telegram bot token (env: TELEGRAM_BOT_TOKEN)")
 	telegramChatID := flag.String("telegram-chat-id", "", "Telegram chat ID for HITL (env: TELEGRAM_CHAT_ID)")
 	hitlTimeout := flag.Duration("hitl-timeout", 1*time.Hour, "HITL decision timeout")
@@ -91,6 +95,18 @@ func main() {
 	}
 	if *openrouterKey == "" {
 		*openrouterKey = os.Getenv("OPENROUTER_API_KEY")
+	}
+	if *togetherKey == "" {
+		*togetherKey = os.Getenv("TOGETHER_API_KEY")
+	}
+	if *nvidiaNimKey == "" {
+		*nvidiaNimKey = os.Getenv("NVIDIA_API_KEY")
+	}
+	if *glhfKey == "" {
+		*glhfKey = os.Getenv("GLHF_API_KEY")
+	}
+	if *chutesKey == "" {
+		*chutesKey = os.Getenv("CHUTES_API_KEY")
 	}
 
 	// Setup structured logging
@@ -220,9 +236,29 @@ func main() {
 		quotas = append(quotas, cost.ProviderQuota{Name: "openrouter", DailyRequests: 200})
 		logger.Info("LLM provider added", "name", "openrouter", "model", "llama-3.3-70b-instruct:free")
 	}
+	if *togetherKey != "" {
+		providers = append(providers, llm.NewOpenAICompatProvider("together", "https://api.together.xyz/v1", *togetherKey, "meta-llama/Llama-3.3-70B-Instruct-Turbo-Free"))
+		quotas = append(quotas, cost.ProviderQuota{Name: "together", DailyRequests: 200})
+		logger.Info("LLM provider added", "name", "together", "model", "Llama-3.3-70B-Instruct-Turbo-Free")
+	}
+	if *nvidiaNimKey != "" {
+		providers = append(providers, llm.NewOpenAICompatProvider("nvidia", "https://integrate.api.nvidia.com/v1", *nvidiaNimKey, "meta/llama-3.3-70b-instruct"))
+		quotas = append(quotas, cost.ProviderQuota{Name: "nvidia", DailyRequests: 200})
+		logger.Info("LLM provider added", "name", "nvidia", "model", "llama-3.3-70b-instruct")
+	}
+	if *glhfKey != "" {
+		providers = append(providers, llm.NewOpenAICompatProvider("glhf", "https://glhf.chat/api/openai/v1", *glhfKey, "hf:meta-llama/Llama-3.3-70B-Instruct"))
+		quotas = append(quotas, cost.ProviderQuota{Name: "glhf", DailyRequests: 200})
+		logger.Info("LLM provider added", "name", "glhf", "model", "Llama-3.3-70B-Instruct")
+	}
+	if *chutesKey != "" {
+		providers = append(providers, llm.NewOpenAICompatProvider("chutes", "https://llm.chutes.ai/v1", *chutesKey, "meta-llama/Llama-3.3-70B-Instruct"))
+		quotas = append(quotas, cost.ProviderQuota{Name: "chutes", DailyRequests: 200})
+		logger.Info("LLM provider added", "name", "chutes", "model", "Llama-3.3-70B-Instruct")
+	}
 
 	if len(providers) == 0 {
-		logger.Error("no LLM providers configured — provide at least one API key (--gemini-key, --cerebras-key, --groq-key, --samba-key, --openrouter-key or env vars)")
+		logger.Error("no LLM providers configured — provide at least one API key (--gemini-key, --cerebras-key, --groq-key, --samba-key, --openrouter-key, --together-key, --nvidia-key, --glhf-key, --chutes-key or env vars)")
 		os.Exit(1)
 	}
 

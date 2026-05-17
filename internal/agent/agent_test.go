@@ -132,8 +132,8 @@ func TestToolExecutor_Execute_UnknownTool(t *testing.T) {
 
 func TestToolsPrompt(t *testing.T) {
 	prompt := ToolsPrompt()
-	if !startsWith(prompt, "Available tools:") {
-		t.Error("ToolsPrompt should start with 'Available tools:'")
+	if !startsWith(prompt, "Tools:") {
+		t.Error("ToolsPrompt should start with 'Tools:'")
 	}
 	tools := AllTools()
 	for _, tool := range tools {
