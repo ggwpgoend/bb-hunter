@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 )
 
@@ -73,13 +74,15 @@ type Provider interface {
 	Available() bool
 }
 
-// Client manages multiple LLM providers with failover.
+// Client manages multiple LLM providers with round-robin failover.
 type Client struct {
-	providers []Provider
+	providers  []Provider
 	killSwitch bool
+	nextIdx    int // round-robin index for provider rotation
+	mu         sync.Mutex
 }
 
-// NewClient creates a new multi-provider LLM client.
+// NewClient creates a new multi-provider LLM client with round-robin rotation.
 func NewClient(providers ...Provider) (*Client, error) {
 	if len(providers) == 0 {
 		return nil, ErrNoProviders
@@ -87,15 +90,24 @@ func NewClient(providers ...Provider) (*Client, error) {
 	return &Client{providers: providers}, nil
 }
 
-// Complete tries each provider in order until one succeeds.
-// Skips providers that report they are unavailable.
+// Complete uses round-robin to distribute calls across providers.
+// On failure, tries the remaining providers before giving up.
 func (c *Client) Complete(ctx context.Context, req *Request) (*Response, error) {
 	if c.killSwitch {
 		return nil, ErrKillSwitch
 	}
 
+	c.mu.Lock()
+	startIdx := c.nextIdx
+	c.nextIdx = (c.nextIdx + 1) % len(c.providers)
+	c.mu.Unlock()
+
 	var lastErr error
-	for _, p := range c.providers {
+	n := len(c.providers)
+	for i := 0; i < n; i++ {
+		idx := (startIdx + i) % n
+		p := c.providers[idx]
+
 		if !p.Available() {
 			continue
 		}
@@ -106,7 +118,6 @@ func (c *Client) Complete(ctx context.Context, req *Request) (*Response, error) 
 			continue
 		}
 
-		// Check for sentinel leak (prompt injection indicator)
 		if req.SentinelUUID != "" {
 			resp.SentinelLeaked = containsSentinel(resp.Content, req.SentinelUUID)
 		}

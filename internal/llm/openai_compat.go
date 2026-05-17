@@ -23,6 +23,7 @@ type OpenAICompatProvider struct {
 	mu          sync.Mutex
 	rateLimited bool
 	retryAfter  time.Time
+	cooldownSec int // adaptive cooldown duration (grows on repeated rate limits)
 }
 
 // NewOpenAICompatProvider creates a provider for any OpenAI-compatible endpoint.
@@ -46,6 +47,7 @@ func (o *OpenAICompatProvider) Available() bool {
 		return false
 	}
 	o.rateLimited = false
+	o.cooldownSec = 0
 	return true
 }
 
@@ -135,8 +137,13 @@ func (o *OpenAICompatProvider) Complete(ctx context.Context, req *Request) (*Res
 
 	if httpResp.StatusCode == 429 {
 		o.mu.Lock()
+		if o.cooldownSec < 30 {
+			o.cooldownSec = 30
+		} else if o.cooldownSec < 300 {
+			o.cooldownSec *= 2
+		}
 		o.rateLimited = true
-		o.retryAfter = time.Now().Add(60 * time.Second)
+		o.retryAfter = time.Now().Add(time.Duration(o.cooldownSec) * time.Second)
 		o.mu.Unlock()
 		return nil, fmt.Errorf("%w: %s: %s", ErrRateLimited, o.name, string(respBody))
 	}
