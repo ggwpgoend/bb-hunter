@@ -108,8 +108,10 @@ func (a *Agent) Run(ctx context.Context) ([]Finding, error) {
 		}
 
 		a.log.Info("agent: step", "step", step, "max", a.cfg.MaxSteps)
+		a.display.Waiting(step, a.cfg.MaxSteps)
 
 		// Call LLM
+		llmStart := time.Now()
 		resp, err := a.cfg.LLMClient.Complete(ctx, &llm.Request{
 			Messages:    a.history,
 			MaxTokens:   2048,
@@ -133,6 +135,9 @@ func (a *Agent) Run(ctx context.Context) ([]Finding, error) {
 		// Parse the response
 		content := strings.TrimSpace(resp.Content)
 		a.history = append(a.history, llm.Message{Role: llm.RoleAssistant, Content: content})
+
+		a.display.Info(fmt.Sprintf("LLM responded in %s via %s (%d tokens)",
+			time.Since(llmStart).Round(time.Millisecond), resp.Provider, resp.InputTokens+resp.OutputTokens))
 
 		a.log.Debug("agent: LLM response",
 			"step", step,
@@ -167,7 +172,9 @@ func (a *Agent) Run(ctx context.Context) ([]Finding, error) {
 		a.display.Action(tool, args)
 
 		// Execute tool
+		toolStart := time.Now()
 		observation := a.executor.Execute(ctx, tool, args)
+		a.display.ActionDone(tool, time.Since(toolStart))
 
 		// Display observation
 		a.display.Observation(observation)
