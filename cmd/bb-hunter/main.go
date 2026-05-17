@@ -227,10 +227,10 @@ func main() {
 	closerouterModel := flag.String("closerouter-model", "", "CloseRouter model override; empty=per-stage default (env: CLOSEROUTER_MODEL)")
 	closerouterBudget := flag.Float64("closerouter-daily-usd", 1.0, "Client-side daily USD spending cap for CloseRouter (0 = disabled, server-side cap still applies)")
 	llm7Key := flag.String("llm7-key", "", "LLM7.io API key (env: LLM7_API_KEY)")
-	llm7Model := flag.String("llm7-model", "qwen2.5-coder-32b-instruct", "LLM7.io model name (env: LLM7_MODEL)")
+	_ = flag.String("llm7-model", "qwen2.5-coder-32b-instruct", "LLM7.io model name (env: LLM7_MODEL)")
 	uncloseaiKey := flag.String("uncloseai-key", "", "UncloseAI API key (env: UNCLOSEAI_API_KEY)")
-	uncloseaiModel := flag.String("uncloseai-model", "hf.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q4_K_M", "UncloseAI model name (env: UNCLOSEAI_MODEL)")
-	pollinationsModel := flag.String("pollinations-model", "qwen-coder", "Pollinations.ai model name (env: POLLINATIONS_MODEL)")
+	_ = flag.String("uncloseai-model", "hf.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q4_K_M", "UncloseAI model name (env: UNCLOSEAI_MODEL)")
+	_ = flag.String("pollinations-model", "qwen-coder", "Pollinations.ai model name (env: POLLINATIONS_MODEL)")
 
 	telegramToken := flag.String("telegram-token", "", "Telegram bot token (env: TELEGRAM_BOT_TOKEN)")
 	telegramChatID := flag.String("telegram-chat-id", "", "Telegram chat ID for HITL (env: TELEGRAM_CHAT_ID)")
