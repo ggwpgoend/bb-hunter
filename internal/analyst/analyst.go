@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/ggwpgoend/bb-hunter/internal/llm"
 	"github.com/ggwpgoend/bb-hunter/internal/models"
@@ -257,6 +258,8 @@ func clampConfidence(c float64) float64 {
 
 func generateSentinel() string {
 	b := make([]byte, 16)
-	rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		return fmt.Sprintf("sentinel-%d", time.Now().UnixNano())
+	}
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }

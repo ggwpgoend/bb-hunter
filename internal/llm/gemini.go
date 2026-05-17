@@ -121,7 +121,7 @@ func (g *GeminiProvider) Complete(ctx context.Context, req *Request) (*Response,
 	if req.MaxTokens > 0 {
 		cfg.MaxOutputTokens = req.MaxTokens
 	}
-	if req.Temperature > 0 {
+	if req.Temperature >= 0 {
 		cfg.Temperature = req.Temperature
 	}
 	if req.JSONMode {

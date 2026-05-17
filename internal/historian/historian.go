@@ -230,7 +230,7 @@ func buildDiffPrompt(diff *differ.DiffResult) string {
 	if diff.ChangedCount > 0 {
 		sb.WriteString("=== ИЗМЕНЁННЫЕ ===\n")
 		for _, e := range diff.Entries {
-			if e.ChangeType == differ.ChangeChanged {
+			if e.ChangeType == differ.ChangeChanged && e.Previous != nil && e.Current != nil {
 				sb.WriteString(fmt.Sprintf("- %s: %s/%s → %s/%s\n",
 					e.FindingKey,
 					e.Previous.Severity, e.Previous.VulnClass,
