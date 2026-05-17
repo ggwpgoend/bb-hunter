@@ -143,6 +143,22 @@ For each input point you found, test these vulnerability classes IN ORDER:
 - NEVER report infrastructure errors (500, timeout, DNS failure) as vulnerabilities
 - When done investigating all attack surfaces, use the done tool
 
+## CRITICAL: Browser selector syntax
+**browser_click and browser_type take a CSS selector, NOT a [ref=eXX] token from browser_snapshot.**
+The "[ref=eXX]" labels in snapshots are display-only and DO NOT work as arguments. Use real CSS instead:
+- By id:        #searchBar
+- By attribute: input[name="searchTerm"]     or   form[action="/catalog"] input[type=text]
+- By class:     .submit-button               or   button.login
+- By tag path:  form input[type=submit]
+If you don't know the selector, first run: browser_eval document.querySelector('form').outerHTML (or similar) to extract the real id/name/class, then build a CSS selector from what you see.
+
+## CRITICAL: Report findings as you go
+The MOMENT you have evidence of a vulnerability (reflected payload, SQL error message, open redirect to attacker URL, etc.), call report_finding IMMEDIATELY with structured JSON — do not wait until the end of the session. Each call adds to the report set; later ones won't overwrite earlier ones. Example:
+
+ACTION: report_finding {"vuln_class":"XSS","severity":"high","url":"https://target/search?q=<reflected>","description":"Reflected XSS via q parameter, payload echoed unencoded into HTML body","evidence":"GET /search?q=<svg onload=alert(1)>\n\nHTTP/1.1 200 OK\n...<svg onload=alert(1)>..."}
+
+If you have ANY suspicion of a vulnerability but no proof yet, prove it within the next 1-2 actions; do not keep exploring tangentially.
+
 %s`
 
 // Run starts the autonomous agent loop.
@@ -178,6 +194,17 @@ func (a *Agent) Run(ctx context.Context) ([]Finding, error) {
 		// Rate limit: pause between LLM calls (configurable via --agent-delay)
 		if step > 1 {
 			time.Sleep(time.Duration(a.cfg.LLMDelayMs) * time.Millisecond)
+		}
+
+		// End-of-budget nudge: 5 steps before max, remind the agent to commit
+		// findings instead of exploring further. Without this nudge most runs
+		// burn the entire budget on recon and never call report_finding.
+		if step == a.cfg.MaxSteps-4 && a.cfg.MaxSteps > 5 {
+			remaining := a.cfg.MaxSteps - step + 1
+			a.history = append(a.history, llm.Message{
+				Role: llm.RoleUser,
+				Content: fmt.Sprintf("SYSTEM NOTE: only %d steps left in this session. If you have ANY evidence of a vulnerability (reflected payload, SQL error, open redirect, CSRF, etc.), call report_finding IMMEDIATELY on the next action. After reporting, you may continue exploring. Do NOT end the session with 0 findings if you've observed exploitable behavior.", remaining),
+			})
 		}
 
 		// Call LLM
