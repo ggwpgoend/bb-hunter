@@ -162,8 +162,8 @@ func TestTruncate(t *testing.T) {
 func TestDisplay(t *testing.T) {
 	// Smoke test — just ensure no panics
 	d := NewDisplay()
-	d.Banner("example.com", 3)
-	d.Think("Testing the display")
+	d.Banner("example.com", []string{"cerebras", "groq", "sambanova"})
+	d.Think("Testing the display", "cerebras")
 	d.Action("http_get", "https://example.com")
 	d.Observation("HTTP 200 OK\nContent-Type: text/html")
 	d.Finding("xss", "high", "https://example.com/q=<script>", "Reflected XSS found")

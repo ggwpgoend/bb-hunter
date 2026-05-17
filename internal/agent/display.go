@@ -42,7 +42,7 @@ func NewDisplay() *Display {
 }
 
 // Banner prints the agent mode startup banner.
-func (d *Display) Banner(target string, providers int) {
+func (d *Display) Banner(target string, providerNames []string) {
 	fmt.Fprintf(os.Stderr, "\n")
 	fmt.Fprintf(os.Stderr, "%s%s ========================================== %s\n", colorBold, bgPurple, colorReset)
 	fmt.Fprintf(os.Stderr, "%s%s   BB-Hunter Agent Mode                    %s\n", colorBold, bgPurple, colorReset)
@@ -50,16 +50,20 @@ func (d *Display) Banner(target string, providers int) {
 	fmt.Fprintf(os.Stderr, "%s%s ========================================== %s\n", colorBold, bgPurple, colorReset)
 	fmt.Fprintf(os.Stderr, "\n")
 	fmt.Fprintf(os.Stderr, "  %sTarget:%s     %s\n", colorDim, colorReset, target)
-	fmt.Fprintf(os.Stderr, "  %sProviders:%s  %d LLM(s) active\n", colorDim, colorReset, providers)
+	fmt.Fprintf(os.Stderr, "  %sProviders:%s  %d LLM(s): %s\n", colorDim, colorReset, len(providerNames), strings.Join(providerNames, ", "))
 	fmt.Fprintf(os.Stderr, "  %sStarted:%s    %s\n", colorDim, colorReset, time.Now().Format("15:04:05"))
 	fmt.Fprintf(os.Stderr, "\n")
 }
 
-// Think prints an AI reasoning block.
-func (d *Display) Think(thought string) {
+// Think prints an AI reasoning block with provider name.
+func (d *Display) Think(thought, provider string) {
 	d.step++
 	elapsed := time.Since(d.startAt).Round(time.Second)
-	fmt.Fprintf(os.Stderr, "%s%s[%s | Step %d]%s\n", colorBold, colorPurple, elapsed, d.step, colorReset)
+	if provider != "" {
+		fmt.Fprintf(os.Stderr, "%s%s[%s | Step %d | %s]%s\n", colorBold, colorPurple, elapsed, d.step, provider, colorReset)
+	} else {
+		fmt.Fprintf(os.Stderr, "%s%s[%s | Step %d]%s\n", colorBold, colorPurple, elapsed, d.step, colorReset)
+	}
 	fmt.Fprintf(os.Stderr, "%s%s  THINK:%s %s\n", colorBold, colorCyan, colorReset, thought)
 	fmt.Fprintf(os.Stderr, "\n")
 }
