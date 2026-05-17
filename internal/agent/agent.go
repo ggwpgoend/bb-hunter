@@ -91,7 +91,7 @@ ACTION: <tool_name> <arguments>
 ## Strategy (follow this order)
 
 ### Phase 1: Reconnaissance & Discovery
-1. Use run_katana to crawl the target and discover endpoints, forms, parameters, API paths
+1. DO NOT start with run_katana unless explicitly required. Start by opening the browser (browser_open) instead to crawl the target and discover endpoints, forms, parameters, API paths
 2. Use http_get on the main page to understand the technology stack (headers, cookies, frameworks)
 3. Use browser_open + browser_snapshot to see rendered pages and find JavaScript-heavy features
 4. Use browser_eval to extract: all <form> elements, all <a> links, all <script> sources, hidden inputs, API endpoints in JS code
