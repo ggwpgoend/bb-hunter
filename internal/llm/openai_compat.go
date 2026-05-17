@@ -102,7 +102,7 @@ func (o *OpenAICompatProvider) Complete(ctx context.Context, req *Request) (*Res
 	if req.MaxTokens > 0 {
 		oaiReq.MaxTokens = req.MaxTokens
 	}
-	if req.Temperature > 0 {
+	if req.Temperature >= 0 {
 		oaiReq.Temperature = req.Temperature
 	}
 	if req.JSONMode {

@@ -202,11 +202,26 @@ func (w *Writer) flush(ops []WriteOp) {
 		var execErr error
 		switch op.Type {
 		case "finding":
-			execErr = w.insertFinding(tx, op.Data.(*models.Finding))
+			f, ok := op.Data.(*models.Finding)
+			if !ok {
+				w.logger.Error("db: invalid data type for finding")
+				continue
+			}
+			execErr = w.insertFinding(tx, f)
 		case "scan_run":
-			execErr = w.insertScanRun(tx, op.Data.(*models.ScanRun))
+			sr, ok := op.Data.(*models.ScanRun)
+			if !ok {
+				w.logger.Error("db: invalid data type for scan_run")
+				continue
+			}
+			execErr = w.insertScanRun(tx, sr)
 		case "audit":
-			execErr = w.insertAudit(tx, op.Data.(*models.AuditEntry))
+			e, ok := op.Data.(*models.AuditEntry)
+			if !ok {
+				w.logger.Error("db: invalid data type for audit")
+				continue
+			}
+			execErr = w.insertAudit(tx, e)
 		default:
 			w.logger.Warn("db: unknown op type", "type", op.Type)
 		}
