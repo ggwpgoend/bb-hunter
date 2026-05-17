@@ -180,7 +180,7 @@ var stageDefaults = map[string]stageModelCfg{
 			LLM7:         "qwen2.5-coder-32b-instruct",
 		UncloseAI:    "hf.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q4_K_M",
 		Pollinations: "openai",
-},
+}
 }
 
 // stageBuildOpts bundles every key/model knob used when constructing per-stage
