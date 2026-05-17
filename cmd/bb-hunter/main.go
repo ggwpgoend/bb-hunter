@@ -123,7 +123,7 @@ func buildStageClient(stage, sambaKey, freetheaiKey, canopyKey, canopyFastKey st
 	}
 	if ck != "" {
 		providers = append(providers, llm.NewOpenAICompatProvider(
-			"canopy", "https://inference.canopywave.io/v1", ck, cfg.Canopy))
+			"canopy", "https://api.canopywave.io/v1", ck, cfg.Canopy))
 	}
 
 	if len(providers) == 0 {
@@ -300,7 +300,11 @@ func main() {
 	fmt.Fprintf(os.Stderr, "Program:    %s\n", sf.Program)
 	fmt.Fprintf(os.Stderr, "Platform:   %s\n", sf.Platform)
 	fmt.Fprintf(os.Stderr, "Domains:    %v\n", sf.Domains)
-	fmt.Fprintf(os.Stderr, "Proxy:      %s\n", *proxyAddr)
+	if *agentMode {
+		fmt.Fprintf(os.Stderr, "Proxy:      disabled (agent mode)\n")
+	} else {
+		fmt.Fprintf(os.Stderr, "Proxy:      %s\n", *proxyAddr)
+	}
 	fmt.Fprintf(os.Stderr, "DB:         %s\n", *dbPath)
 	fmt.Fprintf(os.Stderr, "Rate:       %.0f req/s\n", *ratePerSecond)
 	fmt.Fprintf(os.Stderr, "=========================\n\n")
@@ -397,12 +401,12 @@ func main() {
 		logger.Info("LLM provider added", "name", "freetheai", "model", *freetheaiModel)
 	}
 	if *canopywaveKey != "" {
-		providers = append(providers, llm.NewOpenAICompatProvider("canopywave", "https://inference.canopywave.io/v1", *canopywaveKey, *canopywaveModel))
+		providers = append(providers, llm.NewOpenAICompatProvider("canopywave", "https://api.canopywave.io/v1", *canopywaveKey, *canopywaveModel))
 		quotas = append(quotas, cost.ProviderQuota{Name: "canopywave", DailyRequests: 50000})
 		logger.Info("LLM provider added", "name", "canopywave", "model", *canopywaveModel, "plan", "unlimited")
 	}
 	if *canopywaveFastKey != "" {
-		providers = append(providers, llm.NewOpenAICompatProvider("canopywave-fast", "https://inference.canopywave.io/v1", *canopywaveFastKey, *canopywaveModel))
+		providers = append(providers, llm.NewOpenAICompatProvider("canopywave-fast", "https://api.canopywave.io/v1", *canopywaveFastKey, *canopywaveModel))
 		quotas = append(quotas, cost.ProviderQuota{Name: "canopywave-fast", DailyRequests: 50000})
 		logger.Info("LLM provider added", "name", "canopywave-fast", "model", *canopywaveModel, "plan", "fast-bundle")
 	}
