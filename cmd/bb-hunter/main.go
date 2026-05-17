@@ -226,11 +226,11 @@ func main() {
 	closerouterKey := flag.String("closerouter-key", "", "CloseRouter API key — pay-per-use (env: CLOSEROUTER_API_KEY)")
 	closerouterModel := flag.String("closerouter-model", "", "CloseRouter model override; empty=per-stage default (env: CLOSEROUTER_MODEL)")
 	closerouterBudget := flag.Float64("closerouter-daily-usd", 1.0, "Client-side daily USD spending cap for CloseRouter (0 = disabled, server-side cap still applies)")
-	llm7Key := flag.String("llm7-key", "", "LLM7.io API key (env: LLM7_API_KEY)")
-	_ = flag.String("llm7-model", "qwen2.5-coder-32b-instruct", "LLM7.io model name (env: LLM7_MODEL)")
-	uncloseaiKey := flag.String("uncloseai-key", "", "UncloseAI API key (env: UNCLOSEAI_API_KEY)")
-	_ = flag.String("uncloseai-model", "hf.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q4_K_M", "UncloseAI model name (env: UNCLOSEAI_MODEL)")
-	_ = flag.String("pollinations-model", "qwen-coder", "Pollinations.ai model name (env: POLLINATIONS_MODEL)")
+	llm7Key := flag.String("llm7-key", "", "LLM7.io API key")
+	llm7Model := flag.String("llm7-model", "qwen2.5-coder-32b-instruct", "LLM7.io model name")
+	uncloseaiKey := flag.String("uncloseai-key", "", "UncloseAI API key")
+	uncloseaiModel := flag.String("uncloseai-model", "hf.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q4_K_M", "UncloseAI model name")
+	pollinationsModel := flag.String("pollinations-model", "openai", "Pollinations.ai model name")
 
 	telegramToken := flag.String("telegram-token", "", "Telegram bot token (env: TELEGRAM_BOT_TOKEN)")
 	telegramChatID := flag.String("telegram-chat-id", "", "Telegram chat ID for HITL (env: TELEGRAM_CHAT_ID)")
@@ -531,6 +531,24 @@ func main() {
 		providers = append(providers, llm.NewCloseRouterProvider(*closerouterKey, model, *closerouterBudget))
 		logger.Info("LLM provider added", "name", "closerouter", "model", model, "daily_usd_cap", *closerouterBudget)
 	}
+
+	if *llm7Key != "" {
+		providers = append(providers, llm.NewOpenAICompatProvider("llm7", "https://api.llm7.io/v1", *llm7Key, *llm7Model))
+		quotas = append(quotas, cost.ProviderQuota{Name: "llm7", DailyRequests: 15000})
+		logger.Info("LLM provider added", "name", "llm7", "model", *llm7Model)
+	}
+
+	if *uncloseaiKey != "" {
+		providers = append(providers, llm.NewOpenAICompatProvider("uncloseai", "https://qwen.ai.unturf.com/v1", *uncloseaiKey, *uncloseaiModel))
+		quotas = append(quotas, cost.ProviderQuota{Name: "uncloseai", DailyRequests: 10000})
+		logger.Info("LLM provider added", "name", "uncloseai", "model", *uncloseaiModel)
+	}
+
+	// Pollinations is free and doesn't require a key
+	providers = append(providers, llm.NewOpenAICompatProvider("pollinations", "https://text.pollinations.ai/openai", "anonymous", *pollinationsModel))
+	quotas = append(quotas, cost.ProviderQuota{Name: "pollinations", DailyRequests: 5000})
+	logger.Info("LLM provider added", "name", "pollinations", "model", *pollinationsModel)
+
 
 	if len(providers) == 0 {
 		logger.Error("no LLM providers configured — provide at least one API key (--gemini-key, --cerebras-key, --groq-key, --samba-key, --openrouter-key, --together-key, --nvidia-key, --glhf-key, --chutes-key, --freetheai-key or env vars)")
