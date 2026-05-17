@@ -68,9 +68,15 @@ func (d *Display) Think(thought, provider string) {
 	fmt.Fprintf(os.Stderr, "\n")
 }
 
-// Waiting prints a progress message while waiting for LLM.
+// Waiting prints a progress message while waiting for LLM. When maxSteps
+// is 0 the agent is running in unlimited mode, so the counter shows just
+// the current step instead of "step N/M".
 func (d *Display) Waiting(step, maxSteps int) {
 	elapsed := time.Since(d.startAt).Round(time.Second)
+	if maxSteps <= 0 {
+		fmt.Fprintf(os.Stderr, "%s%s  ... AI is thinking [step %d, %s elapsed] ...%s\n", colorBold, colorDim, step, elapsed, colorReset)
+		return
+	}
 	fmt.Fprintf(os.Stderr, "%s%s  ... AI is thinking [step %d/%d, %s elapsed] ...%s\n", colorBold, colorDim, step, maxSteps, elapsed, colorReset)
 }
 

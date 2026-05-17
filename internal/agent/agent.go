@@ -5,10 +5,16 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/ggwpgoend/bb-hunter/internal/llm"
 )
+
+// StopGraceSteps is the number of extra steps the agent is allowed to take
+// after the user requests a graceful stop. This gives the model time to
+// commit any pending evidence via report_finding before exiting.
+const StopGraceSteps = 5
 
 // FindingCallback is called when the agent reports a finding (e.g. for HITL integration).
 type FindingCallback func(ctx context.Context, finding Finding) error
@@ -21,7 +27,7 @@ type Config struct {
 	AgentBrowserBin string
 	ScreenshotDir   string
 	ProxyAddr       string
-	MaxSteps        int
+	MaxSteps        int // 0 = unlimited; agent runs until user requests stop or LLM emits 'done'
 	Logger          *slog.Logger
 	OnFinding       FindingCallback // called on each report_finding (HITL integration)
 	LLMDelayMs      int             // delay between LLM calls in milliseconds (0 = default 3000ms)
@@ -34,12 +40,18 @@ type Agent struct {
 	display  *Display
 	log      *slog.Logger
 	history  []llm.Message
+
+	// stopRequested is set to 1 by RequestStop() to signal the run loop to
+	// wind down gracefully. The loop runs at most StopGraceSteps more turns
+	// after the flag flips, then exits regardless.
+	stopRequested atomic.Bool
 }
 
 // New creates a new agent.
 func New(cfg Config) *Agent {
-	if cfg.MaxSteps <= 0 {
-		cfg.MaxSteps = 30
+	// MaxSteps == 0 means unlimited. Anything < 0 is treated as 0.
+	if cfg.MaxSteps < 0 {
+		cfg.MaxSteps = 0
 	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
@@ -53,6 +65,20 @@ func New(cfg Config) *Agent {
 		display:  NewDisplay(),
 		log:      cfg.Logger,
 	}
+}
+
+// RequestStop signals a graceful shutdown: the agent will receive a
+// synthetic SYSTEM NOTE on the next turn telling it to report any
+// remaining evidence and call `done`. After StopGraceSteps turns the loop
+// exits unconditionally, returning whatever findings have been recorded.
+// Calling RequestStop more than once is a no-op.
+func (a *Agent) RequestStop() {
+	a.stopRequested.Store(true)
+}
+
+// StopRequested reports whether RequestStop has been called.
+func (a *Agent) StopRequested() bool {
+	return a.stopRequested.Load()
 }
 
 const agentSystemPrompt = `You are an expert autonomous bug bounty hunter. Your goal is to find REAL, EXPLOITABLE vulnerabilities on the target — not infrastructure noise.
@@ -179,16 +205,37 @@ func (a *Agent) Run(ctx context.Context) ([]Finding, error) {
 	}
 
 	a.display.Info(fmt.Sprintf("Starting autonomous investigation of %s", a.cfg.Target))
+	if a.cfg.MaxSteps == 0 {
+		a.display.Info("Unlimited step budget — press Ctrl+C once to request a graceful stop (agent will commit findings and exit), twice to hard-kill.")
+	}
 
-	for step := 1; step <= a.cfg.MaxSteps; step++ {
+	// stopInjectedAtStep is the step at which the graceful-stop SYSTEM NOTE
+	// was added to history; used to bound the post-stop window.
+	stopInjectedAtStep := 0
+
+	// loopActive returns true while the agent should keep iterating.
+	loopActive := func(step int) bool {
+		// Hard cap (only when MaxSteps > 0).
+		if a.cfg.MaxSteps > 0 && step > a.cfg.MaxSteps {
+			return false
+		}
+		// Graceful-stop window: once requested, allow up to StopGraceSteps
+		// more turns, then exit.
+		if stopInjectedAtStep > 0 && step > stopInjectedAtStep+StopGraceSteps {
+			return false
+		}
+		return true
+	}
+
+	for step := 1; loopActive(step); step++ {
 		select {
 		case <-ctx.Done():
-			a.display.Info("Agent interrupted by user (Ctrl+C)")
-			break
+			a.display.Info("Agent interrupted by user (hard kill)")
+			goto endLoop
 		default:
 		}
 
-		a.log.Info("agent: step", "step", step, "max", a.cfg.MaxSteps)
+		a.log.Info("agent: step", "step", step, "max", a.cfg.MaxSteps, "stop_requested", a.stopRequested.Load())
 		a.display.Waiting(step, a.cfg.MaxSteps)
 
 		// Rate limit: pause between LLM calls (configurable via --agent-delay)
@@ -196,14 +243,14 @@ func (a *Agent) Run(ctx context.Context) ([]Finding, error) {
 			time.Sleep(time.Duration(a.cfg.LLMDelayMs) * time.Millisecond)
 		}
 
-		// End-of-budget nudge: 5 steps before max, remind the agent to commit
-		// findings instead of exploring further. Without this nudge most runs
-		// burn the entire budget on recon and never call report_finding.
-		if step == a.cfg.MaxSteps-4 && a.cfg.MaxSteps > 5 {
-			remaining := a.cfg.MaxSteps - step + 1
+		// Graceful stop: inject a SYSTEM NOTE once, then let the loopActive
+		// helper count down StopGraceSteps more turns before exiting.
+		if a.stopRequested.Load() && stopInjectedAtStep == 0 {
+			stopInjectedAtStep = step
+			a.display.Info(fmt.Sprintf("Stop requested — granting %d more steps to commit findings and exit gracefully.", StopGraceSteps))
 			a.history = append(a.history, llm.Message{
 				Role: llm.RoleUser,
-				Content: fmt.Sprintf("SYSTEM NOTE: only %d steps left in this session. If you have ANY evidence of a vulnerability (reflected payload, SQL error, open redirect, CSRF, etc.), call report_finding IMMEDIATELY on the next action. After reporting, you may continue exploring. Do NOT end the session with 0 findings if you've observed exploitable behavior.", remaining),
+				Content: fmt.Sprintf("SYSTEM NOTE: the user requested a graceful stop. You have AT MOST %d more turns. If you have ANY evidence of a vulnerability (reflected payload, SQL error, open redirect, CSRF, prototype pollution, etc.), call report_finding IMMEDIATELY on the next action — one report per turn. When you have committed every finding you have evidence for, output `ACTION: done` to exit cleanly. Do NOT keep exploring new attack surface.", StopGraceSteps),
 			})
 		}
 
@@ -310,6 +357,7 @@ func (a *Agent) Run(ctx context.Context) ([]Finding, error) {
 		a.trimHistory()
 	}
 
+endLoop:
 	findings := a.executor.Findings()
 	a.display.Summary(len(findings), a.display.step, time.Since(startTime))
 
