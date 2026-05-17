@@ -60,19 +60,76 @@ type stageModelCfg struct {
 //   - exploiter: PoC code generation → coding models
 //   - agent:     autonomous bug hunting → best reasoning + tool use
 var stageDefaults = map[string]stageModelCfg{
-	// Canopy Wave available models per key:
-	//   Fast Bundle:   minimax/minimax-m2.5, xiaomimimo/mimo-v2.5
-	//   Unlimited 50M: minimax/minimax-m2.5, moonshotai/kimi-k2.6
-	// Speed-critical stages (analyst,gate,chainer,exploiter) use Fast key.
-	// Heavy stages (reporter,historian,agent) use Unlimited key.
+	// analyst: Deep processing of large data (scan outputs, DOMs). Needs large context + reasoning.
 	"analyst": {
-		Samba:     "DeepSeek-V3.2",
-		FreeTheAI: "cat/claude-opus-4-7",
-		Canopy:    "minimax/minimax-m2.5",
-		// no closerouter by default — free providers handle classification fine
-			LLM7:         "mistral-small-3.1-24b-instruct-2503",
+		Samba:        "DeepSeek-V3.2",
+		FreeTheAI:    "cat/claude-opus-4-7",
+		Canopy:       "moonshotai/kimi-k2.6", // Kimi has massive context
+		CloseRouter:  "anthropic/claude-3-5-sonnet-20241022",
+		LLM7:         "gpt-o3-2025-04-16", // o3 is great at reasoning
+		UncloseAI:    "hf.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q4_K_M",
+		Pollinations: "openai-large",
+	},
+	// reporter: Writing high-quality bug bounty reports. Needs good formatting and clarity.
+	"reporter": {
+		Samba:        "MiniMax-M2.7",
+		FreeTheAI:    "cat/gpt-5.5",
+		Canopy:       "moonshotai/kimi-k2.6",
+		CloseRouter:  "anthropic/claude-3-5-sonnet-20241022",
+		LLM7:         "mistral-large-2411",
+		UncloseAI:    "hf.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q4_K_M",
+		Pollinations: "openai-large",
+	},
+	// historian: Diffing states, tracking what changed over time. Needs large context.
+	"historian": {
+		Samba:        "gemma-3-12b-it",
+		FreeTheAI:    "cat/gemini-3-flash",
+		Canopy:       "moonshotai/kimi-k2.6",
+		CloseRouter:  "anthropic/claude-3-haiku-20240307",
+		LLM7:         "gpt-4o-mini-2024-07-18",
 		UncloseAI:    "hf.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q4_K_M",
 		Pollinations: "openai",
+	},
+	// gate: Fast validation filter (7 questions). Needs speed and strict logic.
+	"gate": {
+		Samba:        "DeepSeek-V3.2",
+		FreeTheAI:    "cat/claude-4-6-sonnet",
+		Canopy:       "minimax/minimax-m2.5",
+		CloseRouter:  "anthropic/claude-3-haiku-20240307",
+		LLM7:         "deepseek-r1-0528",
+		UncloseAI:    "hf.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q4_K_M",
+		Pollinations: "openai",
+	},
+	// chainer: Building exploit chains. Needs top-tier reasoning.
+	"chainer": {
+		Samba:        "DeepSeek-V3.1",
+		FreeTheAI:    "cat/gpt-5",
+		Canopy:       "minimax/minimax-m2.5",
+		CloseRouter:  "anthropic/claude-opus-4.7",
+		LLM7:         "deepseek-r1-0528",
+		UncloseAI:    "hf.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q4_K_M",
+		Pollinations: "openai-large",
+	},
+	// exploiter: Writing PoC code, tampers, bypasses. Needs best coding models.
+	"exploiter": {
+		Samba:        "DeepSeek-V3.2",
+		FreeTheAI:    "bbg/deepseek-ai/DeepSeek-V4-Pro",
+		Canopy:       "xiaomimimo/mimo-v2.5",
+		CloseRouter:  "anthropic/claude-3-5-sonnet-20241022",
+		LLM7:         "qwen2.5-coder-32b-instruct", // Specifically for coding
+		UncloseAI:    "hf.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q4_K_M", // Coding specialist
+		Pollinations: "qwen-coder",
+	},
+	// agent: The main autonomous driver. Needs absolute best tool calling and planning.
+	"agent": {
+		Samba:        "DeepSeek-V3.2",
+		FreeTheAI:    "cat/claude-opus-4-7", // Claude Opus 4.7 is unmatched for agent tool calling
+		Canopy:       "minimax/minimax-m2.5",
+		CloseRouter:  "anthropic/claude-opus-4.7",
+		LLM7:         "gpt-o3-2025-04-16", // o3 as fallback
+		UncloseAI:    "hf.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q4_K_M",
+		Pollinations: "deepseek-v3",
+	},
 },
 	"reporter": {
 		Samba:     "MiniMax-M2.7",
