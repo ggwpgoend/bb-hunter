@@ -45,6 +45,9 @@ type stageModelCfg struct {
 	FreeTheAI   string
 	Canopy      string
 	CloseRouter string // pay-per-use; only used on premium stages by default
+	LLM7        string
+	UncloseAI   string
+	Pollinations string
 }
 
 // stageDefaults maps pipeline stages to optimal model selections.
@@ -67,39 +70,60 @@ var stageDefaults = map[string]stageModelCfg{
 		FreeTheAI: "cat/claude-opus-4-7",
 		Canopy:    "minimax/minimax-m2.5",
 		// no closerouter by default — free providers handle classification fine
-	},
+			LLM7:         "mistral-small-3.1-24b-instruct-2503",
+		UncloseAI:    "hf.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q4_K_M",
+		Pollinations: "openai",
+},
 	"reporter": {
 		Samba:     "MiniMax-M2.7",
 		FreeTheAI: "cat/gpt-5.5",
 		Canopy:    "moonshotai/kimi-k2.6",
-	},
+			LLM7:         "mistral-large-2411",
+		UncloseAI:    "hf.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q4_K_M",
+		Pollinations: "openai",
+},
 	"historian": {
 		Samba:     "gemma-3-12b-it",
 		FreeTheAI: "cat/gemini-3-flash",
 		Canopy:    "minimax/minimax-m2.5",
-	},
+			LLM7:         "mistral-small-2503",
+		UncloseAI:    "hf.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q4_K_M",
+		Pollinations: "openai",
+},
 	"gate": {
 		Samba:     "DeepSeek-V3.2",
 		FreeTheAI: "cat/claude-4-6-sonnet",
 		Canopy:    "minimax/minimax-m2.5",
-	},
+			LLM7:         "gpt-4o-mini-2024-07-18",
+		UncloseAI:    "hf.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q4_K_M",
+		Pollinations: "openai",
+},
 	"chainer": {
 		Samba:     "DeepSeek-V3.1",
 		FreeTheAI: "cat/gpt-5",
 		Canopy:    "xiaomimimo/mimo-v2.5",
-	},
+			LLM7:         "deepseek-r1-0528",
+		UncloseAI:    "hf.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q4_K_M",
+		Pollinations: "openai",
+},
 	"exploiter": {
 		Samba:       "DeepSeek-V3.2",
 		FreeTheAI:   "bbg/deepseek-ai/DeepSeek-V4-Pro",
 		Canopy:      "xiaomimimo/mimo-v2.5",
 		CloseRouter: "anthropic/claude-opus-4.7", // best code-gen for PoCs
-	},
+			LLM7:         "qwen2.5-coder-32b-instruct",
+		UncloseAI:    "hf.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q4_K_M",
+		Pollinations: "openai",
+},
 	"agent": {
 		Samba:       "DeepSeek-V3.2",
 		FreeTheAI:   "cat/claude-opus-4-7",
 		Canopy:      "moonshotai/kimi-k2.6",
 		CloseRouter: "anthropic/claude-opus-4.7", // best reasoning + tool use
-	},
+			LLM7:         "qwen2.5-coder-32b-instruct",
+		UncloseAI:    "hf.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q4_K_M",
+		Pollinations: "openai",
+},
 }
 
 // stageBuildOpts bundles every key/model knob used when constructing per-stage
@@ -202,6 +226,12 @@ func main() {
 	closerouterKey := flag.String("closerouter-key", "", "CloseRouter API key — pay-per-use (env: CLOSEROUTER_API_KEY)")
 	closerouterModel := flag.String("closerouter-model", "", "CloseRouter model override; empty=per-stage default (env: CLOSEROUTER_MODEL)")
 	closerouterBudget := flag.Float64("closerouter-daily-usd", 1.0, "Client-side daily USD spending cap for CloseRouter (0 = disabled, server-side cap still applies)")
+	llm7Key := flag.String("llm7-key", "", "LLM7.io API key (env: LLM7_API_KEY)")
+	llm7Model := flag.String("llm7-model", "qwen2.5-coder-32b-instruct", "LLM7.io model name (env: LLM7_MODEL)")
+	uncloseaiKey := flag.String("uncloseai-key", "", "UncloseAI API key (env: UNCLOSEAI_API_KEY)")
+	uncloseaiModel := flag.String("uncloseai-model", "hf.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q4_K_M", "UncloseAI model name (env: UNCLOSEAI_MODEL)")
+	pollinationsModel := flag.String("pollinations-model", "qwen-coder", "Pollinations.ai model name (env: POLLINATIONS_MODEL)")
+
 	telegramToken := flag.String("telegram-token", "", "Telegram bot token (env: TELEGRAM_BOT_TOKEN)")
 	telegramChatID := flag.String("telegram-chat-id", "", "Telegram chat ID for HITL (env: TELEGRAM_CHAT_ID)")
 	hitlTimeout := flag.Duration("hitl-timeout", 1*time.Hour, "HITL decision timeout")
@@ -226,6 +256,12 @@ func main() {
 	// Fallback to env vars for Telegram config
 	if *telegramToken == "" {
 		*telegramToken = os.Getenv("TELEGRAM_BOT_TOKEN")
+	}
+	if *llm7Key == "" {
+		*llm7Key = os.Getenv("LLM7_API_KEY")
+	}
+	if *uncloseaiKey == "" {
+		*uncloseaiKey = os.Getenv("UNCLOSEAI_API_KEY")
 	}
 	if *telegramChatID == "" {
 		*telegramChatID = os.Getenv("TELEGRAM_CHAT_ID")
