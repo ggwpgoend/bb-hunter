@@ -63,7 +63,7 @@ var stageDefaults = map[string]stageModelCfg{
 	// analyst: Deep processing of large data (scan outputs, DOMs). Needs large context + reasoning.
 	"analyst": {
 		Samba:        "DeepSeek-V3.2",
-		FreeTheAI:    "cat/claude-opus-4-7",
+		FreeTheAI:    "gemini-2.5-flash",
 		Canopy:       "moonshotai/kimi-k2.6", // Kimi has massive context
 		CloseRouter:  "anthropic/claude-3-5-sonnet-20241022",
 		LLM7:         "gpt-o3-2025-04-16", // o3 is great at reasoning
@@ -73,7 +73,7 @@ var stageDefaults = map[string]stageModelCfg{
 	// reporter: Writing high-quality bug bounty reports. Needs good formatting and clarity.
 	"reporter": {
 		Samba:        "MiniMax-M2.7",
-		FreeTheAI:    "cat/gpt-5.5",
+		FreeTheAI:    "gemini-2.5-flash",
 		Canopy:       "moonshotai/kimi-k2.6",
 		CloseRouter:  "anthropic/claude-3-5-sonnet-20241022",
 		LLM7:         "mistral-large-2411",
@@ -83,7 +83,7 @@ var stageDefaults = map[string]stageModelCfg{
 	// historian: Diffing states, tracking what changed over time. Needs large context.
 	"historian": {
 		Samba:        "gemma-3-12b-it",
-		FreeTheAI:    "cat/gemini-3-flash",
+		FreeTheAI:    "gemini-2.5-flash",
 		Canopy:       "moonshotai/kimi-k2.6",
 		CloseRouter:  "anthropic/claude-3-haiku-20240307",
 		LLM7:         "gpt-4o-mini-2024-07-18",
@@ -93,7 +93,7 @@ var stageDefaults = map[string]stageModelCfg{
 	// gate: Fast validation filter (7 questions). Needs speed and strict logic.
 	"gate": {
 		Samba:        "DeepSeek-V3.2",
-		FreeTheAI:    "cat/claude-4-6-sonnet",
+		FreeTheAI:    "gemini-2.5-flash",
 		Canopy:       "minimax/minimax-m2.5",
 		CloseRouter:  "anthropic/claude-3-haiku-20240307",
 		LLM7:         "deepseek-r1-0528",
@@ -103,7 +103,7 @@ var stageDefaults = map[string]stageModelCfg{
 	// chainer: Building exploit chains. Needs top-tier reasoning.
 	"chainer": {
 		Samba:        "DeepSeek-V3.1",
-		FreeTheAI:    "cat/gpt-5",
+		FreeTheAI:    "gemini-2.5-flash",
 		Canopy:       "minimax/minimax-m2.5",
 		CloseRouter:  "anthropic/claude-opus-4.7",
 		LLM7:         "deepseek-r1-0528",
@@ -113,7 +113,7 @@ var stageDefaults = map[string]stageModelCfg{
 	// exploiter: Writing PoC code, tampers, bypasses. Needs best coding models.
 	"exploiter": {
 		Samba:        "DeepSeek-V3.2",
-		FreeTheAI:    "bbg/deepseek-ai/DeepSeek-V4-Pro",
+		FreeTheAI:    "gemini-2.5-flash",
 		Canopy:       "xiaomimimo/mimo-v2.5",
 		CloseRouter:  "anthropic/claude-3-5-sonnet-20241022",
 		LLM7:         "qwen2.5-coder-32b-instruct", // Specifically for coding
@@ -123,7 +123,7 @@ var stageDefaults = map[string]stageModelCfg{
 	// agent: The main autonomous driver. Needs absolute best tool calling and planning.
 	"agent": {
 		Samba:        "DeepSeek-V3.2",
-		FreeTheAI:    "cat/claude-opus-4-7", // Claude Opus 4.7 is unmatched for agent tool calling
+		FreeTheAI:    "gemini-2.5-flash", // Claude Opus 4.7 is unmatched for agent tool calling
 		Canopy:       "minimax/minimax-m2.5",
 		CloseRouter:  "anthropic/claude-opus-4.7",
 		LLM7:         "gpt-o3-2025-04-16", // o3 as fallback
@@ -563,10 +563,10 @@ func main() {
 		quotas = append(quotas, cost.ProviderQuota{Name: "chutes", DailyRequests: 200})
 		logger.Info("LLM provider added", "name", "chutes", "model", "Llama-3.3-70B-Instruct")
 	}
-	if *freetheaiKey != "" {
-		providers = append(providers, llm.NewOpenAICompatProvider("freetheai", "https://api.freetheai.xyz/v1", *freetheaiKey, *freetheaiModel))
-		quotas = append(quotas, cost.ProviderQuota{Name: "freetheai", DailyRequests: 10000})
-		logger.Info("LLM provider added", "name", "freetheai", "model", *freetheaiModel)
+	if *geminiKey != "" {
+		providers = append(providers, llm.NewGeminiProvider(*geminiKey, "gemini-2.5-flash"))
+		quotas = append(quotas, cost.ProviderQuota{Name: "gemini", DailyRequests: 1500})
+		logger.Info("LLM provider added", "name", "gemini", "model", "gemini-2.5-flash")
 	}
 	if *canopywaveKey != "" {
 		providers = append(providers, llm.NewOpenAICompatProvider("canopywave", "https://inference.canopywave.io/v1", *canopywaveKey, *canopywaveModel))
