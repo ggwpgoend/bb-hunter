@@ -64,9 +64,20 @@ func (d *Display) Think(thought string) {
 	fmt.Fprintf(os.Stderr, "\n")
 }
 
+// Waiting prints a progress message while waiting for LLM.
+func (d *Display) Waiting(step, maxSteps int) {
+	elapsed := time.Since(d.startAt).Round(time.Second)
+	fmt.Fprintf(os.Stderr, "%s%s  ... AI is thinking [step %d/%d, %s elapsed] ...%s\n", colorBold, colorDim, step, maxSteps, elapsed, colorReset)
+}
+
 // Action prints a tool invocation.
 func (d *Display) Action(tool, args string) {
 	fmt.Fprintf(os.Stderr, "%s%s  ACTION:%s %s%s%s %s\n", colorBold, colorYellow, colorReset, colorBold, tool, colorReset, args)
+}
+
+// ActionDone prints tool execution time.
+func (d *Display) ActionDone(tool string, dur time.Duration) {
+	fmt.Fprintf(os.Stderr, "  %s%s  (%s took %s)%s\n", colorDim, colorGreen, tool, dur.Round(time.Millisecond), colorReset)
 }
 
 // Observation prints a tool result (truncated if long).

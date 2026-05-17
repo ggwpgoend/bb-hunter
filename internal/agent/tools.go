@@ -42,12 +42,12 @@ func AllTools() []ToolDef {
 	}
 }
 
-// ToolsPrompt returns a formatted string listing all tools for the system prompt.
+// ToolsPrompt returns a compact string listing all tools for the system prompt.
 func ToolsPrompt() string {
 	var sb strings.Builder
-	sb.WriteString("Available tools:\n\n")
+	sb.WriteString("Available tools:\n")
 	for _, t := range AllTools() {
-		sb.WriteString(fmt.Sprintf("  %s %s\n    %s\n\n", t.Name, t.Args, t.Description))
+		sb.WriteString(fmt.Sprintf("- %s %s — %s\n", t.Name, t.Args, t.Description))
 	}
 	return sb.String()
 }
