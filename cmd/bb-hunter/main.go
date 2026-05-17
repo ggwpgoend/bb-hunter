@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -218,7 +219,7 @@ func main() {
 	dryRun := flag.Bool("dry-run", false, "parse scope and validate config without scanning")
 	checkLLM := flag.Bool("check-llm", false, "check LLM provider availability and exit")
 	agentMode := flag.Bool("agent", false, "enable autonomous LLM agent mode (AI drives the tools)")
-	agentMaxSteps := flag.Int("agent-steps", 30, "max steps for agent mode")
+	agentMaxSteps := flag.Int("agent-steps", 0, "max steps for agent mode (0 = unlimited; first Ctrl+C requests a graceful stop, second hard-kills)")
 	agentDelayMs := flag.Int("agent-delay", 3000, "delay between LLM calls in ms (100 = 10 req/sec)")
 	flag.Parse()
 
@@ -363,12 +364,41 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// Two-stage shutdown: first SIGINT optionally fires a "graceful stop"
+	// callback (set by agent mode when the agent is created). Second SIGINT
+	// (or any SIGTERM) cancels the context for a hard exit.
+	var (
+		gracefulStop   func()
+		gracefulStopMu sync.Mutex
+	)
+	setGracefulStop := func(f func()) {
+		gracefulStopMu.Lock()
+		gracefulStop = f
+		gracefulStopMu.Unlock()
+	}
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
-		sig := <-sigCh
-		logger.Info("shutting down", "signal", sig.String())
-		cancel()
+		firstSeen := false
+		for sig := range sigCh {
+			if sig == syscall.SIGTERM {
+				logger.Info("shutting down (SIGTERM)", "signal", sig.String())
+				cancel()
+				return
+			}
+			gracefulStopMu.Lock()
+			gs := gracefulStop
+			gracefulStopMu.Unlock()
+			if !firstSeen && gs != nil {
+				firstSeen = true
+				fmt.Fprintf(os.Stderr, "\n[Ctrl+C] Graceful stop requested — agent will commit findings and exit. Press Ctrl+C again to hard-kill.\n\n")
+				gs()
+				continue
+			}
+			logger.Info("shutting down", "signal", sig.String())
+			cancel()
+			return
+		}
 	}()
 
 	// Initialize SQLite writer
@@ -551,6 +581,10 @@ func main() {
 			OnFinding:       onFinding,
 			LLMDelayMs:      *agentDelayMs,
 		})
+
+		// Wire the first-Ctrl+C signal to the agent's graceful stop hook.
+		// A second Ctrl+C will fall through and cancel ctx for a hard exit.
+		setGracefulStop(ag.RequestStop)
 
 		findings, agentErr := ag.Run(ctx)
 		if agentErr != nil {
