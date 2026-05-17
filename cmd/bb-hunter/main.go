@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ggwpgoend/bb-hunter/internal/agent"
 	"github.com/ggwpgoend/bb-hunter/internal/analyst"
 	"github.com/ggwpgoend/bb-hunter/internal/audit"
 	"github.com/ggwpgoend/bb-hunter/internal/browser"
@@ -63,6 +64,8 @@ func main() {
 	ratePerSecond := flag.Float64("rate", 10, "requests per second to target")
 	dryRun := flag.Bool("dry-run", false, "parse scope and validate config without scanning")
 	checkLLM := flag.Bool("check-llm", false, "check LLM provider availability and exit")
+	agentMode := flag.Bool("agent", false, "enable autonomous LLM agent mode (AI drives the tools)")
+	agentMaxSteps := flag.Int("agent-steps", 30, "max steps for agent mode")
 	flag.Parse()
 
 	// Fallback to env vars for Telegram config
@@ -221,6 +224,33 @@ func main() {
 	if len(providers) == 0 {
 		logger.Error("no LLM providers configured — provide at least one API key (--gemini-key, --cerebras-key, --groq-key, --samba-key, --openrouter-key or env vars)")
 		os.Exit(1)
+	}
+
+	// --agent mode: autonomous LLM-driven bug hunting
+	if *agentMode {
+		tmpClient, _ := llm.NewClient(providers...)
+		ag := agent.New(agent.Config{
+			Target:          sf.Domains[0],
+			Domains:         sf.Domains,
+			LLMClient:       tmpClient,
+			AgentBrowserBin: "agent-browser",
+			ScreenshotDir:   *screenshotDir,
+			ProxyAddr:       "",
+			MaxSteps:        *agentMaxSteps,
+			Logger:          logger,
+		})
+
+		findings, agentErr := ag.Run(ctx)
+		if agentErr != nil {
+			logger.Error("agent mode failed", "error", agentErr)
+			os.Exit(1)
+		}
+
+		fmt.Fprintf(os.Stderr, "\nAgent found %d potential vulnerabilities.\n", len(findings))
+		for i, f := range findings {
+			fmt.Fprintf(os.Stdout, "[%d] %s %s — %s\n    %s\n\n", i+1, f.Severity, f.VulnClass, f.URL, f.Description)
+		}
+		os.Exit(0)
 	}
 
 	// --check-llm: verify provider connectivity and exit
