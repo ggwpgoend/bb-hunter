@@ -62,41 +62,34 @@ var stageDefaults = map[string]stageModelCfg{
 	//   Unlimited 50M: minimax/minimax-m2.5, moonshotai/kimi-k2.6
 	// Speed-critical stages (analyst,gate,chainer,exploiter) use Fast key.
 	// Heavy stages (reporter,historian,agent) use Unlimited key.
+	// FreeTheAI removed from defaults (unstable), still usable via --freetheai-key.
 	"analyst": {
-		Samba:     "DeepSeek-V3.2",
-		FreeTheAI: "cat/claude-opus-4-7",
-		Canopy:    "minimax/minimax-m2.5",
-		// no closerouter by default — free providers handle classification fine
+		Samba:  "DeepSeek-V3.2",
+		Canopy: "minimax/minimax-m2.5",
 	},
 	"reporter": {
-		Samba:     "MiniMax-M2.7",
-		FreeTheAI: "cat/gpt-5.5",
-		Canopy:    "moonshotai/kimi-k2.6",
+		Samba:  "MiniMax-M2.7",
+		Canopy: "moonshotai/kimi-k2.6",
 	},
 	"historian": {
-		Samba:     "gemma-3-12b-it",
-		FreeTheAI: "cat/gemini-3-flash",
-		Canopy:    "minimax/minimax-m2.5",
+		Samba:  "gemma-3-12b-it",
+		Canopy: "minimax/minimax-m2.5",
 	},
 	"gate": {
-		Samba:     "DeepSeek-V3.2",
-		FreeTheAI: "cat/claude-4-6-sonnet",
-		Canopy:    "minimax/minimax-m2.5",
+		Samba:  "DeepSeek-V3.2",
+		Canopy: "minimax/minimax-m2.5",
 	},
 	"chainer": {
-		Samba:     "DeepSeek-V3.1",
-		FreeTheAI: "cat/gpt-5",
-		Canopy:    "xiaomimimo/mimo-v2.5",
+		Samba:  "DeepSeek-V3.1",
+		Canopy: "xiaomimimo/mimo-v2.5",
 	},
 	"exploiter": {
 		Samba:       "DeepSeek-V3.2",
-		FreeTheAI:   "bbg/deepseek-ai/DeepSeek-V4-Pro",
 		Canopy:      "xiaomimimo/mimo-v2.5",
 		CloseRouter: "anthropic/claude-opus-4.7", // best code-gen for PoCs
 	},
 	"agent": {
 		Samba:       "DeepSeek-V3.2",
-		FreeTheAI:   "cat/claude-opus-4-7",
 		Canopy:      "moonshotai/kimi-k2.6",
 		CloseRouter: "anthropic/claude-opus-4.7", // best reasoning + tool use
 	},
@@ -556,16 +549,22 @@ func main() {
 
 			onFinding = func(fctx context.Context, f agent.Finding) error {
 				mf := &models.Finding{
-					ID:        fmt.Sprintf("agent-%d", time.Now().UnixNano()),
-					URL:       f.URL,
-					VulnClass: models.VulnClass(f.VulnClass),
-					Severity:  models.Severity(f.Severity),
+					ID:              fmt.Sprintf("agent-%d", time.Now().UnixNano()),
+					URL:             f.URL,
+					Method:          "GET",
+					VulnClass:       models.VulnClass(f.VulnClass),
+					Severity:        models.Severity(f.Severity),
+					Hypothesis:      f.Description,
 					ScannerEvidence: f.Evidence,
 					ReportMarkdown:  f.Description,
-					Status:    models.StatusNew,
+					Status:          models.StatusNew,
+					CreatedAt:       time.Now(),
 				}
-				_, err := hitlBot.SendFinding(fctx, mf)
-				return err
+				_, sendErr := hitlBot.SendFinding(fctx, mf)
+				if sendErr != nil {
+					logger.Error("HITL: failed to send finding to Telegram", "error", sendErr, "finding_url", f.URL)
+				}
+				return sendErr
 			}
 		}
 
