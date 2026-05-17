@@ -52,6 +52,8 @@ func main() {
 	nvidiaNimKey := flag.String("nvidia-key", "", "NVIDIA NIM API key (env: NVIDIA_API_KEY)")
 	glhfKey := flag.String("glhf-key", "", "GLHF.chat API key (env: GLHF_API_KEY)")
 	chutesKey := flag.String("chutes-key", "", "Chutes AI API key (env: CHUTES_API_KEY)")
+	freetheaiKey := flag.String("freetheai-key", "", "FreeTheAI API key (env: FREETHEAI_API_KEY)")
+	freetheaiModel := flag.String("freetheai-model", "cat/gemini-3-flash", "FreeTheAI model name (env: FREETHEAI_MODEL)")
 	telegramToken := flag.String("telegram-token", "", "Telegram bot token (env: TELEGRAM_BOT_TOKEN)")
 	telegramChatID := flag.String("telegram-chat-id", "", "Telegram chat ID for HITL (env: TELEGRAM_CHAT_ID)")
 	hitlTimeout := flag.Duration("hitl-timeout", 1*time.Hour, "HITL decision timeout")
@@ -70,6 +72,7 @@ func main() {
 	checkLLM := flag.Bool("check-llm", false, "check LLM provider availability and exit")
 	agentMode := flag.Bool("agent", false, "enable autonomous LLM agent mode (AI drives the tools)")
 	agentMaxSteps := flag.Int("agent-steps", 30, "max steps for agent mode")
+	agentDelayMs := flag.Int("agent-delay", 3000, "delay between LLM calls in ms (100 = 10 req/sec)")
 	flag.Parse()
 
 	// Fallback to env vars for Telegram config
@@ -107,6 +110,14 @@ func main() {
 	}
 	if *chutesKey == "" {
 		*chutesKey = os.Getenv("CHUTES_API_KEY")
+	}
+	if *freetheaiKey == "" {
+		*freetheaiKey = os.Getenv("FREETHEAI_API_KEY")
+	}
+	if *freetheaiModel == "" || *freetheaiModel == "cat/gemini-3-flash" {
+		if env := os.Getenv("FREETHEAI_MODEL"); env != "" {
+			*freetheaiModel = env
+		}
 	}
 
 	// Setup structured logging
@@ -151,14 +162,19 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Start egress proxy
-	egressProxy := proxy.NewEgressProxy(enforcer, *proxyAddr, logger)
-	go func() {
-		if err := egressProxy.ListenAndServe(); err != nil {
-			logger.Error("egress proxy failed", "error", err)
-		}
-	}()
-	logger.Info("egress proxy started", "addr", *proxyAddr)
+	// Start egress proxy (skip in agent mode — direct connections are more reliable)
+	var egressProxy *proxy.EgressProxy
+	if !*agentMode {
+		egressProxy = proxy.NewEgressProxy(enforcer, *proxyAddr, logger)
+		go func() {
+			if err := egressProxy.ListenAndServe(); err != nil {
+				logger.Error("egress proxy failed", "error", err)
+			}
+		}()
+		logger.Info("egress proxy started", "addr", *proxyAddr)
+	} else {
+		logger.Info("egress proxy skipped (agent mode)")
+	}
 
 	// Print banner
 	fmt.Fprintf(os.Stderr, "\n=== BB-Hunter ===\n")
@@ -256,15 +272,50 @@ func main() {
 		quotas = append(quotas, cost.ProviderQuota{Name: "chutes", DailyRequests: 200})
 		logger.Info("LLM provider added", "name", "chutes", "model", "Llama-3.3-70B-Instruct")
 	}
+	if *freetheaiKey != "" {
+		providers = append(providers, llm.NewOpenAICompatProvider("freetheai", "https://api.freetheai.xyz/v1", *freetheaiKey, *freetheaiModel))
+		quotas = append(quotas, cost.ProviderQuota{Name: "freetheai", DailyRequests: 10000})
+		logger.Info("LLM provider added", "name", "freetheai", "model", *freetheaiModel)
+	}
 
 	if len(providers) == 0 {
-		logger.Error("no LLM providers configured — provide at least one API key (--gemini-key, --cerebras-key, --groq-key, --samba-key, --openrouter-key, --together-key, --nvidia-key, --glhf-key, --chutes-key or env vars)")
+		logger.Error("no LLM providers configured — provide at least one API key (--gemini-key, --cerebras-key, --groq-key, --samba-key, --openrouter-key, --together-key, --nvidia-key, --glhf-key, --chutes-key, --freetheai-key or env vars)")
 		os.Exit(1)
 	}
 
 	// --agent mode: autonomous LLM-driven bug hunting
 	if *agentMode {
 		tmpClient, _ := llm.NewClient(providers...)
+
+		// Set up HITL callback if Telegram is configured
+		var onFinding agent.FindingCallback
+		var hitlBot *hitl.Bot
+		chatIDNum, _ := strconv.ParseInt(*telegramChatID, 10, 64)
+		if *telegramToken != "" && chatIDNum != 0 {
+			hitlBot = hitl.NewBot(hitl.Config{
+				Token:   *telegramToken,
+				ChatID:  chatIDNum,
+				Timeout: *hitlTimeout,
+				Logger:  logger,
+			})
+			go hitlBot.StartPolling(ctx)
+			logger.Info("HITL Telegram bot started for agent mode")
+
+			onFinding = func(fctx context.Context, f agent.Finding) error {
+				mf := &models.Finding{
+					ID:        fmt.Sprintf("agent-%d", time.Now().UnixNano()),
+					URL:       f.URL,
+					VulnClass: models.VulnClass(f.VulnClass),
+					Severity:  models.Severity(f.Severity),
+					ScannerEvidence: f.Evidence,
+					ReportMarkdown:  f.Description,
+					Status:    models.StatusNew,
+				}
+				_, err := hitlBot.SendFinding(fctx, mf)
+				return err
+			}
+		}
+
 		ag := agent.New(agent.Config{
 			Target:          sf.Domains[0],
 			Domains:         sf.Domains,
@@ -274,6 +325,8 @@ func main() {
 			ProxyAddr:       "",
 			MaxSteps:        *agentMaxSteps,
 			Logger:          logger,
+			OnFinding:       onFinding,
+			LLMDelayMs:      *agentDelayMs,
 		})
 
 		findings, agentErr := ag.Run(ctx)
@@ -285,6 +338,13 @@ func main() {
 		fmt.Fprintf(os.Stderr, "\nAgent found %d potential vulnerabilities.\n", len(findings))
 		for i, f := range findings {
 			fmt.Fprintf(os.Stdout, "[%d] %s %s — %s\n    %s\n\n", i+1, f.Severity, f.VulnClass, f.URL, f.Description)
+		}
+
+		// Wait for HITL decisions if Telegram is configured and there are findings
+		if hitlBot != nil && len(findings) > 0 {
+			fmt.Fprintf(os.Stderr, "\nWaiting for HITL decisions via Telegram...\n")
+			hitlBot.WaitForAll(ctx)
+			hitlBot.Stop()
 		}
 		os.Exit(0)
 	}
@@ -992,5 +1052,7 @@ func main() {
 	}
 
 	// Graceful shutdown
-	egressProxy.Shutdown(ctx)
+	if egressProxy != nil {
+		egressProxy.Shutdown(ctx)
+	}
 }
