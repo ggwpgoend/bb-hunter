@@ -47,40 +47,15 @@ func New(cfg Config) *Agent {
 	}
 }
 
-const agentSystemPrompt = `You are an autonomous AI bug bounty hunter. Your mission: find real security vulnerabilities on the target.
+const agentSystemPrompt = `You are an autonomous bug bounty hunter. Find real vulnerabilities on the target.
 
-You operate in a ReAct loop: THINK about what to do, then call an ACTION, then observe the result.
+ReAct loop: THINK then ACTION each turn. Format:
+THINK: <reasoning>
+ACTION: <tool> <args>
 
 %s
 
-OUTPUT FORMAT — you MUST follow this format exactly:
-
-THINK: <your reasoning about what to do next and why>
-ACTION: <tool_name> <arguments>
-
-Rules:
-1. ALWAYS output THINK first, then ACTION on the next line
-2. Only ONE action per turn
-3. Analyze observations carefully before next step
-4. Focus on high-impact vulnerabilities: XSS, SQLi, SSRF, IDOR, RCE, auth bypass
-5. Use browser tools to interact with the target like a real user
-6. Use http_get/http_raw to test specific payloads
-7. Use run_nuclei for automated template scanning
-8. Use report_finding when you discover a real vulnerability with evidence
-9. Use done when you've completed your investigation
-10. Be methodical: recon first, then test hypotheses, then verify findings
-11. DO NOT hallucinate findings — only report what you can prove with evidence
-12. Stay within scope: only test the target domain(s)
-
-Workflow suggestions:
-- Start with recon: subfinder, httpx, browser_open to understand the target
-- Look at the page structure, forms, parameters, APIs
-- Test for common vulns: reflected XSS, open redirects, CSRF, info disclosure
-- Check response headers for security misconfigurations
-- Look for hidden endpoints, API keys in source, interesting JS files
-- Try parameter fuzzing on discovered endpoints
-- Use browser_eval to inspect DOM for sensitive data
-- Take screenshots as evidence before reporting findings
+Rules: one action/turn. Stay in scope. Only report verified findings with evidence. Be methodical: recon → hypothesize → test → verify → report. Use done when finished.
 `
 
 // Run starts the autonomous agent loop.
@@ -108,31 +83,51 @@ func (a *Agent) Run(ctx context.Context) ([]Finding, error) {
 		}
 
 		a.log.Info("agent: step", "step", step, "max", a.cfg.MaxSteps)
+		a.display.Waiting(step, a.cfg.MaxSteps)
+
+		// Rate limit: pause between LLM calls to avoid free-tier throttling
+		if step > 1 {
+			time.Sleep(3 * time.Second)
+		}
 
 		// Call LLM
+		llmStart := time.Now()
 		resp, err := a.cfg.LLMClient.Complete(ctx, &llm.Request{
 			Messages:    a.history,
-			MaxTokens:   2048,
-			Temperature: 0.3,
+			MaxTokens:   1024,
+			Temperature: 0.2,
 		})
 		if err != nil {
-			a.display.Error(fmt.Sprintf("LLM call failed: %v", err))
+			a.display.Error(fmt.Sprintf("LLM call failed: %v — retrying in 10s...", err))
 			a.log.Error("agent: LLM failed", "step", step, "error", err)
-			// Retry once
-			time.Sleep(2 * time.Second)
+			// Rate-limit aware retry: wait longer
+			time.Sleep(10 * time.Second)
 			resp, err = a.cfg.LLMClient.Complete(ctx, &llm.Request{
 				Messages:    a.history,
-				MaxTokens:   2048,
-				Temperature: 0.3,
+				MaxTokens:   1024,
+				Temperature: 0.2,
 			})
 			if err != nil {
-				return a.executor.Findings(), fmt.Errorf("agent: LLM failed after retry: %w", err)
+				// Second retry with even longer wait
+				a.display.Error(fmt.Sprintf("LLM retry failed: %v — retrying in 30s...", err))
+				time.Sleep(30 * time.Second)
+				resp, err = a.cfg.LLMClient.Complete(ctx, &llm.Request{
+					Messages:    a.history,
+					MaxTokens:   1024,
+					Temperature: 0.2,
+				})
+				if err != nil {
+					return a.executor.Findings(), fmt.Errorf("agent: LLM failed after 3 retries: %w", err)
+				}
 			}
 		}
 
 		// Parse the response
 		content := strings.TrimSpace(resp.Content)
 		a.history = append(a.history, llm.Message{Role: llm.RoleAssistant, Content: content})
+
+		a.display.Info(fmt.Sprintf("LLM responded in %s via %s (%d tokens)",
+			time.Since(llmStart).Round(time.Millisecond), resp.Provider, resp.InputTokens+resp.OutputTokens))
 
 		a.log.Debug("agent: LLM response",
 			"step", step,
@@ -167,7 +162,9 @@ func (a *Agent) Run(ctx context.Context) ([]Finding, error) {
 		a.display.Action(tool, args)
 
 		// Execute tool
+		toolStart := time.Now()
 		observation := a.executor.Execute(ctx, tool, args)
+		a.display.ActionDone(tool, time.Since(toolStart))
 
 		// Display observation
 		a.display.Observation(observation)
