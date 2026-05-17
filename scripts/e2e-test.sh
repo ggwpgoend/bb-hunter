@@ -187,8 +187,8 @@ echo ""
 # ============================================================
 log "=== Тест 6: Scanner (recon) ==="
 
-# Используем testphp.vulnweb.com — легальный уязвимый сайт Acunetix
-TEST_TARGET="testphp.vulnweb.com"
+# Используем ginandjuice.shop — легальный уязвимый сайт PortSwigger
+TEST_TARGET="ginandjuice.shop"
 
 info "Таргет: $TEST_TARGET"
 
@@ -305,7 +305,7 @@ if [[ -n "$LLM_ARGS" ]]; then
 program: "e2e-test"
 platform: "standoff"
 domains:
-  - "testphp.vulnweb.com"
+  - "ginandjuice.shop"
 SCOPE_EOF
 
     # shellcheck disable=SC2086
