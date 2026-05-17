@@ -40,9 +40,10 @@ import (
 
 // stageModelCfg defines which model to use per provider for a given pipeline stage.
 type stageModelCfg struct {
-	Samba     string
-	FreeTheAI string
-	Canopy    string
+	Samba       string
+	FreeTheAI   string
+	Canopy      string
+	CloseRouter string
 }
 
 // stageDefaults maps pipeline stages to optimal model selections.
@@ -60,47 +61,58 @@ var stageDefaults = map[string]stageModelCfg{
 	//   Unlimited 50M: minimax/minimax-m2.5, moonshotai/kimi-k2.6
 	// Speed-critical stages (analyst,gate,chainer,exploiter) use Fast key.
 	// Heavy stages (reporter,historian,agent) use Unlimited key.
+	//
+	// CloseRouter: pay-per-token via https://api.closerouter.dev/v1
+	// Budget-optimised: cheap mini models for lightweight stages,
+	// stronger models only where reasoning quality matters.
 	"analyst": {
-		Samba:     "DeepSeek-V3.2",
-		FreeTheAI: "cat/claude-opus-4-7",
-		Canopy:    "minimax/minimax-m2.5",
+		Samba:       "DeepSeek-V3.2",
+		FreeTheAI:   "cat/claude-opus-4-7",
+		Canopy:      "minimax/minimax-m2.5",
+		CloseRouter: "anthropic/claude-haiku-4.5",
 	},
 	"reporter": {
-		Samba:     "MiniMax-M2.7",
-		FreeTheAI: "cat/gpt-5.5",
-		Canopy:    "moonshotai/kimi-k2.6",
+		Samba:       "MiniMax-M2.7",
+		FreeTheAI:   "cat/gpt-5.5",
+		Canopy:      "moonshotai/kimi-k2.6",
+		CloseRouter: "openai/gpt-5.4-mini",
 	},
 	"historian": {
-		Samba:     "gemma-3-12b-it",
-		FreeTheAI: "cat/gemini-3-flash",
-		Canopy:    "minimax/minimax-m2.5",
+		Samba:       "gemma-3-12b-it",
+		FreeTheAI:   "cat/gemini-3-flash",
+		Canopy:      "minimax/minimax-m2.5",
+		CloseRouter: "openai/gpt-5.4-mini",
 	},
 	"gate": {
-		Samba:     "DeepSeek-V3.2",
-		FreeTheAI: "cat/claude-4-6-sonnet",
-		Canopy:    "minimax/minimax-m2.5",
+		Samba:       "DeepSeek-V3.2",
+		FreeTheAI:   "cat/claude-4-6-sonnet",
+		Canopy:      "minimax/minimax-m2.5",
+		CloseRouter: "anthropic/claude-haiku-4.5",
 	},
 	"chainer": {
-		Samba:     "DeepSeek-V3.1",
-		FreeTheAI: "cat/gpt-5",
-		Canopy:    "xiaomimimo/mimo-v2.5",
+		Samba:       "DeepSeek-V3.1",
+		FreeTheAI:   "cat/gpt-5",
+		Canopy:      "xiaomimimo/mimo-v2.5",
+		CloseRouter: "openai/gpt-5.4-mini",
 	},
 	"exploiter": {
-		Samba:     "DeepSeek-V3.2",
-		FreeTheAI: "bbg/deepseek-ai/DeepSeek-V4-Pro",
-		Canopy:    "xiaomimimo/mimo-v2.5",
+		Samba:       "DeepSeek-V3.2",
+		FreeTheAI:   "bbg/deepseek-ai/DeepSeek-V4-Pro",
+		Canopy:      "xiaomimimo/mimo-v2.5",
+		CloseRouter: "openai/gpt-5.4-mini",
 	},
 	"agent": {
-		Samba:     "DeepSeek-V3.2",
-		FreeTheAI: "cat/claude-opus-4-7",
-		Canopy:    "moonshotai/kimi-k2.6",
+		Samba:       "DeepSeek-V3.2",
+		FreeTheAI:   "cat/claude-opus-4-7",
+		Canopy:      "moonshotai/kimi-k2.6",
+		CloseRouter: "anthropic/claude-haiku-4.5",
 	},
 }
 
 // buildStageClient creates an LLM client optimized for a specific pipeline stage.
 // It selects the best model per provider based on the stage's requirements.
 // canopyFastKey is used for speed-critical stages (analyst, gate, chainer, exploiter).
-func buildStageClient(stage, sambaKey, freetheaiKey, canopyKey, canopyFastKey string, logger *slog.Logger) *llm.Client {
+func buildStageClient(stage, sambaKey, freetheaiKey, canopyKey, canopyFastKey, closerouterKey string, logger *slog.Logger) *llm.Client {
 	cfg, ok := stageDefaults[stage]
 	if !ok {
 		logger.Warn("unknown stage for model routing, using analyst defaults", "stage", stage)
@@ -131,6 +143,11 @@ func buildStageClient(stage, sambaKey, freetheaiKey, canopyKey, canopyFastKey st
 			"canopy", "https://inference.canopywave.io/v1", ck, cfg.Canopy))
 	}
 
+	if closerouterKey != "" {
+		providers = append(providers, llm.NewOpenAICompatProvider(
+			"closerouter", "https://api.closerouter.dev/v1", closerouterKey, cfg.CloseRouter))
+	}
+
 	if len(providers) == 0 {
 		return nil
 	}
@@ -143,6 +160,7 @@ func buildStageClient(stage, sambaKey, freetheaiKey, canopyKey, canopyFastKey st
 		"samba", cfg.Samba,
 		"freetheai", cfg.FreeTheAI,
 		"canopy", cfg.Canopy,
+		"closerouter", cfg.CloseRouter,
 	)
 
 	return client
@@ -167,6 +185,8 @@ func main() {
 	canopywaveKey := flag.String("canopywave-key", "", "Canopy Wave API key — Unlimited plan (env: CANOPYWAVE_API_KEY)")
 	canopywaveFastKey := flag.String("canopywave-fast-key", "", "Canopy Wave API key — Fast Bundle (env: CANOPYWAVE_FAST_KEY)")
 	canopywaveModel := flag.String("canopywave-model", "minimax/minimax-m2.5", "Canopy Wave model name (env: CANOPYWAVE_MODEL)")
+	closerouterKey := flag.String("closerouter-key", "", "CloseRouter API key (env: CLOSEROUTER_API_KEY)")
+	closerouterModel := flag.String("closerouter-model", "anthropic/claude-haiku-4.5", "CloseRouter default model (env: CLOSEROUTER_MODEL)")
 	telegramToken := flag.String("telegram-token", "", "Telegram bot token (env: TELEGRAM_BOT_TOKEN)")
 	telegramChatID := flag.String("telegram-chat-id", "", "Telegram chat ID for HITL (env: TELEGRAM_CHAT_ID)")
 	hitlTimeout := flag.Duration("hitl-timeout", 1*time.Hour, "HITL decision timeout")
@@ -242,6 +262,14 @@ func main() {
 	}
 	if *canopywaveFastKey == "" {
 		*canopywaveFastKey = os.Getenv("CANOPYWAVE_FAST_KEY")
+	}
+	if *closerouterKey == "" {
+		*closerouterKey = os.Getenv("CLOSEROUTER_API_KEY")
+	}
+	if *closerouterModel == "" || *closerouterModel == "anthropic/claude-haiku-4.5" {
+		if env := os.Getenv("CLOSEROUTER_MODEL"); env != "" {
+			*closerouterModel = env
+		}
 	}
 
 	// Setup structured logging
@@ -415,15 +443,20 @@ func main() {
 		quotas = append(quotas, cost.ProviderQuota{Name: "canopywave-fast", DailyRequests: 50000})
 		logger.Info("LLM provider added", "name", "canopywave-fast", "model", *canopywaveModel, "plan", "fast-bundle")
 	}
+	if *closerouterKey != "" {
+		providers = append(providers, llm.NewOpenAICompatProvider("closerouter", "https://api.closerouter.dev/v1", *closerouterKey, *closerouterModel))
+		quotas = append(quotas, cost.ProviderQuota{Name: "closerouter", DailyRequests: 10000})
+		logger.Info("LLM provider added", "name", "closerouter", "model", *closerouterModel)
+	}
 
 	if len(providers) == 0 {
-		logger.Error("no LLM providers configured — provide at least one API key (--gemini-key, --cerebras-key, --groq-key, --samba-key, --openrouter-key, --together-key, --nvidia-key, --glhf-key, --chutes-key, --freetheai-key or env vars)")
+		logger.Error("no LLM providers configured — provide at least one API key (--gemini-key, --cerebras-key, --groq-key, --samba-key, --openrouter-key, --together-key, --nvidia-key, --glhf-key, --chutes-key, --freetheai-key, --closerouter-key or env vars)")
 		os.Exit(1)
 	}
 
 	// Per-stage model routing: if optimized providers (samba/freetheai/canopy) are configured,
 	// build per-stage clients with optimal model selection for each pipeline stage.
-	usePerStage := *sambaKey != "" || *freetheaiKey != "" || *canopywaveKey != "" || *canopywaveFastKey != ""
+	usePerStage := *sambaKey != "" || *freetheaiKey != "" || *canopywaveKey != "" || *canopywaveFastKey != "" || *closerouterKey != ""
 	var (
 		analystLLM   *llm.Client
 		reporterLLM  *llm.Client
@@ -434,19 +467,19 @@ func main() {
 	)
 	if usePerStage {
 		logger.Info("per-stage model routing enabled")
-		analystLLM = buildStageClient("analyst", *sambaKey, *freetheaiKey, *canopywaveKey, *canopywaveFastKey, logger)
-		reporterLLM = buildStageClient("reporter", *sambaKey, *freetheaiKey, *canopywaveKey, *canopywaveFastKey, logger)
-		historianLLM = buildStageClient("historian", *sambaKey, *freetheaiKey, *canopywaveKey, *canopywaveFastKey, logger)
-		gateLLM = buildStageClient("gate", *sambaKey, *freetheaiKey, *canopywaveKey, *canopywaveFastKey, logger)
-		chainerLLM = buildStageClient("chainer", *sambaKey, *freetheaiKey, *canopywaveKey, *canopywaveFastKey, logger)
-		exploiterLLM = buildStageClient("exploiter", *sambaKey, *freetheaiKey, *canopywaveKey, *canopywaveFastKey, logger)
+		analystLLM = buildStageClient("analyst", *sambaKey, *freetheaiKey, *canopywaveKey, *canopywaveFastKey, *closerouterKey, logger)
+		reporterLLM = buildStageClient("reporter", *sambaKey, *freetheaiKey, *canopywaveKey, *canopywaveFastKey, *closerouterKey, logger)
+		historianLLM = buildStageClient("historian", *sambaKey, *freetheaiKey, *canopywaveKey, *canopywaveFastKey, *closerouterKey, logger)
+		gateLLM = buildStageClient("gate", *sambaKey, *freetheaiKey, *canopywaveKey, *canopywaveFastKey, *closerouterKey, logger)
+		chainerLLM = buildStageClient("chainer", *sambaKey, *freetheaiKey, *canopywaveKey, *canopywaveFastKey, *closerouterKey, logger)
+		exploiterLLM = buildStageClient("exploiter", *sambaKey, *freetheaiKey, *canopywaveKey, *canopywaveFastKey, *closerouterKey, logger)
 	}
 
 	// --agent mode: autonomous LLM-driven bug hunting
 	if *agentMode {
 		var agentClient *llm.Client
 		if usePerStage {
-			agentClient = buildStageClient("agent", *sambaKey, *freetheaiKey, *canopywaveKey, *canopywaveFastKey, logger)
+			agentClient = buildStageClient("agent", *sambaKey, *freetheaiKey, *canopywaveKey, *canopywaveFastKey, *closerouterKey, logger)
 		} else {
 			agentClient, _ = llm.NewClient(providers...)
 		}
