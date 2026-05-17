@@ -22,8 +22,8 @@ type scriptedProvider struct {
 	onCall    func(call int)
 }
 
-func (s *scriptedProvider) Name() string  { return "scripted" }
-func (s *scriptedProvider) Model() string { return "test" }
+func (s *scriptedProvider) Name() string    { return "scripted" }
+func (s *scriptedProvider) Model() string   { return "test" }
 func (s *scriptedProvider) Available() bool { return true }
 func (s *scriptedProvider) Complete(ctx context.Context, req *llm.Request) (*llm.Response, error) {
 	n := int(atomic.AddInt32(&s.calls, 1))
@@ -44,6 +44,8 @@ func (s *scriptedProvider) Complete(ctx context.Context, req *llm.Request) (*llm
 }
 
 func (s *scriptedProvider) Calls() int { return int(atomic.LoadInt32(&s.calls)) }
+
+const fastLoopAction = "THINK: probing\nACTION: no_such_tool"
 
 func TestAgent_New_MaxStepsNormalization(t *testing.T) {
 	cases := []struct {
@@ -86,9 +88,10 @@ func TestAgent_StopRequested_FlipsAtomicFlag(t *testing.T) {
 // TestAgent_Run_RespectsMaxSteps verifies the legacy fixed-budget path still
 // honours MaxSteps when MaxSteps > 0.
 func TestAgent_Run_RespectsMaxSteps(t *testing.T) {
-	// LLM always asks for the same benign action so the agent never emits done
-	// on its own; we want the loop to terminate purely because of MaxSteps.
-	sp := &scriptedProvider{responses: []string{"THINK: probing\nACTION: browser_snapshot"}}
+	// Use an unknown tool so the loop stays fully in-process; this keeps the
+	// test focused on MaxSteps instead of the speed of external binaries like
+	// agent-browser.
+	sp := &scriptedProvider{responses: []string{fastLoopAction}}
 	client, _ := llm.NewClient(sp)
 
 	a := New(Config{
@@ -115,7 +118,7 @@ func TestAgent_Run_UnlimitedAndStopSignal(t *testing.T) {
 	const stopAt = 35 // well past the old default of 30
 
 	sp := &scriptedProvider{
-		responses: []string{"THINK: probing\nACTION: browser_snapshot"},
+		responses: []string{fastLoopAction},
 	}
 
 	// Capture the agent so onCall can request stop on it.
@@ -152,7 +155,7 @@ func TestAgent_Run_UnlimitedAndStopSignal(t *testing.T) {
 	// first observed at the *top* of step stopAt+1 — that's where the SYSTEM
 	// NOTE gets injected. loopActive then allows up to StopGraceSteps more
 	// iterations beyond the injection step.
-	maxAllowed := stopAt + 1 + StopGraceSteps
+	maxAllowed := stopAt + StopGraceSteps
 	if got := sp.Calls(); got > maxAllowed {
 		t.Errorf("agent kept running past grace window: got %d calls, max allowed %d", got, maxAllowed)
 	}
@@ -164,7 +167,7 @@ func TestAgent_Run_StopSignalInjectsSystemNote(t *testing.T) {
 	const stopAt = 2
 
 	sp := &scriptedProvider{
-		responses: []string{"THINK: probing\nACTION: browser_snapshot"},
+		responses: []string{fastLoopAction},
 	}
 
 	var aRef atomic.Pointer[Agent]

@@ -150,7 +150,7 @@ func (te *ToolExecutor) browserOpen(ctx context.Context, url string) string {
 	if out == "" {
 		return fmt.Sprintf("OK: opened %s", url)
 	}
-	return truncate(out, 2000)
+	return truncate(out, 80000)
 }
 
 func (te *ToolExecutor) browserScreenshot(ctx context.Context, filename string) string {
@@ -177,7 +177,7 @@ func (te *ToolExecutor) browserEval(ctx context.Context, js string) string {
 	if err != nil {
 		return fmt.Sprintf("ERROR: %v", err)
 	}
-	return truncate(out, 3000)
+	return truncate(out, 80000)
 }
 
 func (te *ToolExecutor) browserSnapshot(ctx context.Context) string {
@@ -185,13 +185,18 @@ func (te *ToolExecutor) browserSnapshot(ctx context.Context) string {
 	if err != nil {
 		return fmt.Sprintf("ERROR: %v", err)
 	}
-	return truncate(out, 4000)
+	return truncate(out, 80000)
 }
+
+
 
 func (te *ToolExecutor) browserClick(ctx context.Context, selector string) string {
 	selector = strings.TrimSpace(selector)
 	if selector == "" {
-		return "ERROR: CSS selector is required"
+		return "ERROR: CSS selector or @ref is required"
+	}
+	if strings.HasPrefix(selector, "e") && len(selector) > 1 && selector[1] >= '0' && selector[1] <= '9' {
+		selector = "@" + selector
 	}
 	out, err := te.runBrowserCmd(ctx, "click", selector)
 	if err != nil {
@@ -200,22 +205,26 @@ func (te *ToolExecutor) browserClick(ctx context.Context, selector string) strin
 	if out == "" {
 		return fmt.Sprintf("OK: clicked %s", selector)
 	}
-	return truncate(out, 1000)
+	return truncate(out, 80000)
 }
 
 func (te *ToolExecutor) browserType(ctx context.Context, args string) string {
 	parts := strings.SplitN(strings.TrimSpace(args), " ", 2)
 	if len(parts) < 2 {
-		return "ERROR: usage: browser_type <selector> <text>"
+		return "ERROR: usage: browser_type <selector_or_@ref> <text>"
 	}
-	out, err := te.runBrowserCmd(ctx, "type", parts[0], parts[1])
+	selector := parts[0]
+	if strings.HasPrefix(selector, "e") && len(selector) > 1 && selector[1] >= '0' && selector[1] <= '9' {
+		selector = "@" + selector
+	}
+	out, err := te.runBrowserCmd(ctx, "fill", selector, parts[1])
 	if err != nil {
 		return fmt.Sprintf("ERROR: %v", err)
 	}
 	if out == "" {
-		return fmt.Sprintf("OK: typed into %s", parts[0])
+		return fmt.Sprintf("OK: typed into %s", selector)
 	}
-	return truncate(out, 1000)
+	return truncate(out, 80000)
 }
 
 func (te *ToolExecutor) runBrowserCmd(ctx context.Context, args ...string) (string, error) {
@@ -253,7 +262,7 @@ func (te *ToolExecutor) httpGet(ctx context.Context, url string) string {
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 100000))
 
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("HTTP %d %s\n", resp.StatusCode, resp.Status))
@@ -263,7 +272,7 @@ func (te *ToolExecutor) httpGet(ctx context.Context, url string) string {
 	sb.WriteString("\n")
 	sb.WriteString(string(body))
 
-	return truncate(sb.String(), 4000)
+	return truncate(sb.String(), 80000)
 }
 
 func (te *ToolExecutor) httpRaw(ctx context.Context, args string) string {
@@ -305,7 +314,7 @@ func (te *ToolExecutor) httpRaw(ctx context.Context, args string) string {
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 100000))
 
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("HTTP %d %s\n", resp.StatusCode, resp.Status))
@@ -315,7 +324,7 @@ func (te *ToolExecutor) httpRaw(ctx context.Context, args string) string {
 	sb.WriteString("\n")
 	sb.WriteString(string(body))
 
-	return truncate(sb.String(), 4000)
+	return truncate(sb.String(), 80000)
 }
 
 // Recon tools — delegate to installed CLI tools.
@@ -399,7 +408,7 @@ func (te *ToolExecutor) runReconTool(ctx context.Context, tool string, args []st
 	if out == "" {
 		return fmt.Sprintf("OK: %s returned no output (no results)", tool)
 	}
-	return truncate(out, 3000)
+	return truncate(out, 80000)
 }
 
 func (te *ToolExecutor) runCmd(ctx context.Context, cmdStr string) string {
@@ -436,7 +445,7 @@ func (te *ToolExecutor) runCmd(ctx context.Context, cmdStr string) string {
 	if out == "" {
 		return "OK: command completed with no output"
 	}
-	return truncate(out, 3000)
+	return truncate(out, 80000)
 }
 
 func (te *ToolExecutor) reportFinding(args string) string {

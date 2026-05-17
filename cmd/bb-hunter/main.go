@@ -45,6 +45,9 @@ type stageModelCfg struct {
 	FreeTheAI   string
 	Canopy      string
 	CloseRouter string // pay-per-use; only used on premium stages by default
+	LLM7        string
+	UncloseAI   string
+	Pollinations string
 }
 
 // stageDefaults maps pipeline stages to optimal model selections.
@@ -57,49 +60,127 @@ type stageModelCfg struct {
 //   - exploiter: PoC code generation → coding models
 //   - agent:     autonomous bug hunting → best reasoning + tool use
 var stageDefaults = map[string]stageModelCfg{
-	// Canopy Wave available models per key:
-	//   Fast Bundle:   minimax/minimax-m2.5, xiaomimimo/mimo-v2.5
-	//   Unlimited 50M: minimax/minimax-m2.5, moonshotai/kimi-k2.6
-	// Speed-critical stages (analyst,gate,chainer,exploiter) use Fast key.
-	// Heavy stages (reporter,historian,agent) use Unlimited key.
+	// analyst: Deep processing of large data (scan outputs, DOMs). Needs large context + reasoning.
 	"analyst": {
-		Samba:     "DeepSeek-V3.2",
-		FreeTheAI: "cat/claude-opus-4-7",
-		Canopy:    "minimax/minimax-m2.5",
-		// no closerouter by default — free providers handle classification fine
+		Samba:        "DeepSeek-V3.2",
+		FreeTheAI:    "gemini-2.5-flash",
+		Canopy:       "moonshotai/kimi-k2.6", // Kimi has massive context
+		CloseRouter:  "anthropic/claude-3-5-sonnet-20241022",
+		LLM7:         "gpt-o3-2025-04-16", // o3 is great at reasoning
+		UncloseAI:    "hf.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q4_K_M",
+		Pollinations: "openai-large",
 	},
+	// reporter: Writing high-quality bug bounty reports. Needs good formatting and clarity.
+	"reporter": {
+		Samba:        "MiniMax-M2.7",
+		FreeTheAI:    "gemini-2.5-flash",
+		Canopy:       "moonshotai/kimi-k2.6",
+		CloseRouter:  "anthropic/claude-3-5-sonnet-20241022",
+		LLM7:         "mistral-large-2411",
+		UncloseAI:    "hf.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q4_K_M",
+		Pollinations: "openai-large",
+	},
+	// historian: Diffing states, tracking what changed over time. Needs large context.
+	"historian": {
+		Samba:        "gemma-3-12b-it",
+		FreeTheAI:    "gemini-2.5-flash",
+		Canopy:       "moonshotai/kimi-k2.6",
+		CloseRouter:  "anthropic/claude-3-haiku-20240307",
+		LLM7:         "gpt-4o-mini-2024-07-18",
+		UncloseAI:    "hf.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q4_K_M",
+		Pollinations: "openai",
+	},
+	// gate: Fast validation filter (7 questions). Needs speed and strict logic.
+	"gate": {
+		Samba:        "DeepSeek-V3.2",
+		FreeTheAI:    "gemini-2.5-flash",
+		Canopy:       "minimax/minimax-m2.5",
+		CloseRouter:  "anthropic/claude-3-haiku-20240307",
+		LLM7:         "deepseek-r1-0528",
+		UncloseAI:    "hf.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q4_K_M",
+		Pollinations: "openai",
+	},
+	// chainer: Building exploit chains. Needs top-tier reasoning.
+	"chainer": {
+		Samba:        "DeepSeek-V3.1",
+		FreeTheAI:    "gemini-2.5-flash",
+		Canopy:       "minimax/minimax-m2.5",
+		CloseRouter:  "anthropic/claude-opus-4.7",
+		LLM7:         "deepseek-r1-0528",
+		UncloseAI:    "hf.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q4_K_M",
+		Pollinations: "openai-large",
+	},
+	// exploiter: Writing PoC code, tampers, bypasses. Needs best coding models.
+	"exploiter": {
+		Samba:        "DeepSeek-V3.2",
+		FreeTheAI:    "gemini-2.5-flash",
+		Canopy:       "xiaomimimo/mimo-v2.5",
+		CloseRouter:  "anthropic/claude-3-5-sonnet-20241022",
+		LLM7:         "qwen2.5-coder-32b-instruct", // Specifically for coding
+		UncloseAI:    "hf.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q4_K_M", // Coding specialist
+		Pollinations: "qwen-coder",
+	},
+	// agent: The main autonomous driver. Needs absolute best tool calling and planning.
+	"agent": {
+		Samba:        "DeepSeek-V3.2",
+		FreeTheAI:    "gemini-2.5-flash", // Claude Opus 4.7 is unmatched for agent tool calling
+		Canopy:       "minimax/minimax-m2.5",
+		CloseRouter:  "anthropic/claude-opus-4.7",
+		LLM7:         "gpt-o3-2025-04-16", // o3 as fallback
+		UncloseAI:    "hf.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q4_K_M",
+		Pollinations: "deepseek-v3",
+	},
+},
 	"reporter": {
 		Samba:     "MiniMax-M2.7",
 		FreeTheAI: "cat/gpt-5.5",
 		Canopy:    "moonshotai/kimi-k2.6",
-	},
+			LLM7:         "mistral-large-2411",
+		UncloseAI:    "hf.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q4_K_M",
+		Pollinations: "openai",
+},
 	"historian": {
 		Samba:     "gemma-3-12b-it",
 		FreeTheAI: "cat/gemini-3-flash",
 		Canopy:    "minimax/minimax-m2.5",
-	},
+			LLM7:         "mistral-small-2503",
+		UncloseAI:    "hf.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q4_K_M",
+		Pollinations: "openai",
+},
 	"gate": {
 		Samba:     "DeepSeek-V3.2",
 		FreeTheAI: "cat/claude-4-6-sonnet",
 		Canopy:    "minimax/minimax-m2.5",
-	},
+			LLM7:         "gpt-4o-mini-2024-07-18",
+		UncloseAI:    "hf.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q4_K_M",
+		Pollinations: "openai",
+},
 	"chainer": {
 		Samba:     "DeepSeek-V3.1",
 		FreeTheAI: "cat/gpt-5",
 		Canopy:    "xiaomimimo/mimo-v2.5",
-	},
+			LLM7:         "deepseek-r1-0528",
+		UncloseAI:    "hf.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q4_K_M",
+		Pollinations: "openai",
+},
 	"exploiter": {
 		Samba:       "DeepSeek-V3.2",
 		FreeTheAI:   "bbg/deepseek-ai/DeepSeek-V4-Pro",
 		Canopy:      "xiaomimimo/mimo-v2.5",
 		CloseRouter: "anthropic/claude-opus-4.7", // best code-gen for PoCs
-	},
+			LLM7:         "qwen2.5-coder-32b-instruct",
+		UncloseAI:    "hf.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q4_K_M",
+		Pollinations: "openai",
+},
 	"agent": {
 		Samba:       "DeepSeek-V3.2",
 		FreeTheAI:   "cat/claude-opus-4-7",
 		Canopy:      "moonshotai/kimi-k2.6",
 		CloseRouter: "anthropic/claude-opus-4.7", // best reasoning + tool use
-	},
+			LLM7:         "qwen2.5-coder-32b-instruct",
+		UncloseAI:    "hf.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q4_K_M",
+		Pollinations: "openai",
+},
 }
 
 // stageBuildOpts bundles every key/model knob used when constructing per-stage
@@ -202,6 +283,12 @@ func main() {
 	closerouterKey := flag.String("closerouter-key", "", "CloseRouter API key — pay-per-use (env: CLOSEROUTER_API_KEY)")
 	closerouterModel := flag.String("closerouter-model", "", "CloseRouter model override; empty=per-stage default (env: CLOSEROUTER_MODEL)")
 	closerouterBudget := flag.Float64("closerouter-daily-usd", 1.0, "Client-side daily USD spending cap for CloseRouter (0 = disabled, server-side cap still applies)")
+	llm7Key := flag.String("llm7-key", "", "LLM7.io API key")
+	llm7Model := flag.String("llm7-model", "qwen2.5-coder-32b-instruct", "LLM7.io model name")
+	uncloseaiKey := flag.String("uncloseai-key", "", "UncloseAI API key")
+	uncloseaiModel := flag.String("uncloseai-model", "hf.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q4_K_M", "UncloseAI model name")
+	pollinationsModel := flag.String("pollinations-model", "openai", "Pollinations.ai model name")
+
 	telegramToken := flag.String("telegram-token", "", "Telegram bot token (env: TELEGRAM_BOT_TOKEN)")
 	telegramChatID := flag.String("telegram-chat-id", "", "Telegram chat ID for HITL (env: TELEGRAM_CHAT_ID)")
 	hitlTimeout := flag.Duration("hitl-timeout", 1*time.Hour, "HITL decision timeout")
@@ -226,6 +313,12 @@ func main() {
 	// Fallback to env vars for Telegram config
 	if *telegramToken == "" {
 		*telegramToken = os.Getenv("TELEGRAM_BOT_TOKEN")
+	}
+	if *llm7Key == "" {
+		*llm7Key = os.Getenv("LLM7_API_KEY")
+	}
+	if *uncloseaiKey == "" {
+		*uncloseaiKey = os.Getenv("UNCLOSEAI_API_KEY")
 	}
 	if *telegramChatID == "" {
 		*telegramChatID = os.Getenv("TELEGRAM_CHAT_ID")
@@ -470,10 +563,10 @@ func main() {
 		quotas = append(quotas, cost.ProviderQuota{Name: "chutes", DailyRequests: 200})
 		logger.Info("LLM provider added", "name", "chutes", "model", "Llama-3.3-70B-Instruct")
 	}
-	if *freetheaiKey != "" {
-		providers = append(providers, llm.NewOpenAICompatProvider("freetheai", "https://api.freetheai.xyz/v1", *freetheaiKey, *freetheaiModel))
-		quotas = append(quotas, cost.ProviderQuota{Name: "freetheai", DailyRequests: 10000})
-		logger.Info("LLM provider added", "name", "freetheai", "model", *freetheaiModel)
+	if *geminiKey != "" {
+		providers = append(providers, llm.NewGeminiProvider(*geminiKey, "gemini-2.5-flash"))
+		quotas = append(quotas, cost.ProviderQuota{Name: "gemini", DailyRequests: 1500})
+		logger.Info("LLM provider added", "name", "gemini", "model", "gemini-2.5-flash")
 	}
 	if *canopywaveKey != "" {
 		providers = append(providers, llm.NewOpenAICompatProvider("canopywave", "https://inference.canopywave.io/v1", *canopywaveKey, *canopywaveModel))
@@ -495,6 +588,24 @@ func main() {
 		providers = append(providers, llm.NewCloseRouterProvider(*closerouterKey, model, *closerouterBudget))
 		logger.Info("LLM provider added", "name", "closerouter", "model", model, "daily_usd_cap", *closerouterBudget)
 	}
+
+	if *llm7Key != "" {
+		providers = append(providers, llm.NewOpenAICompatProvider("llm7", "https://api.llm7.io/v1", *llm7Key, *llm7Model))
+		quotas = append(quotas, cost.ProviderQuota{Name: "llm7", DailyRequests: 15000})
+		logger.Info("LLM provider added", "name", "llm7", "model", *llm7Model)
+	}
+
+	if *uncloseaiKey != "" {
+		providers = append(providers, llm.NewOpenAICompatProvider("uncloseai", "https://qwen.ai.unturf.com/v1", *uncloseaiKey, *uncloseaiModel))
+		quotas = append(quotas, cost.ProviderQuota{Name: "uncloseai", DailyRequests: 10000})
+		logger.Info("LLM provider added", "name", "uncloseai", "model", *uncloseaiModel)
+	}
+
+	// Pollinations is free and doesn't require a key
+	providers = append(providers, llm.NewOpenAICompatProvider("pollinations", "https://text.pollinations.ai/openai", "anonymous", *pollinationsModel))
+	quotas = append(quotas, cost.ProviderQuota{Name: "pollinations", DailyRequests: 5000})
+	logger.Info("LLM provider added", "name", "pollinations", "model", *pollinationsModel)
+
 
 	if len(providers) == 0 {
 		logger.Error("no LLM providers configured — provide at least one API key (--gemini-key, --cerebras-key, --groq-key, --samba-key, --openrouter-key, --together-key, --nvidia-key, --glhf-key, --chutes-key, --freetheai-key or env vars)")
