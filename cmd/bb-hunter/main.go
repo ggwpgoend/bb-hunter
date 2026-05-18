@@ -220,10 +220,12 @@ func main() {
 	groqKey := flag.String("groq-key", "", "Groq API key (env: GROQ_API_KEY)")
 	sambaKey := flag.String("samba-key", "", "SambaNova API key (env: SAMBA_API_KEY)")
 	openrouterKey := flag.String("openrouter-key", "", "OpenRouter API key (env: OPENROUTER_API_KEY)")
+	openrouterModel := flag.String("openrouter-model", "deepseek/deepseek-v4-flash:free", "OpenRouter model name (env: OPENROUTER_MODEL). Default :free model rotates; many :free models share an upstream throttle so set OPENROUTER_MODEL or buy $10 credit to lift the limit.")
 	togetherKey := flag.String("together-key", "", "Together AI API key (env: TOGETHER_API_KEY)")
 	nvidiaNimKey := flag.String("nvidia-key", "", "NVIDIA NIM API key (env: NVIDIA_API_KEY)")
 	glhfKey := flag.String("glhf-key", "", "GLHF.chat API key (env: GLHF_API_KEY)")
 	chutesKey := flag.String("chutes-key", "", "Chutes AI API key (env: CHUTES_API_KEY)")
+	chutesModel := flag.String("chutes-model", "deepseek-ai/DeepSeek-V3.2-TEE", "Chutes AI model name (env: CHUTES_MODEL). Old default meta-llama/Llama-3.3-70B-Instruct was removed from the Chutes catalog.")
 	freetheaiKey := flag.String("freetheai-key", "", "FreeTheAI API key (env: FREETHEAI_API_KEY)")
 	freetheaiModel := flag.String("freetheai-model", "cat/gemini-3-flash", "FreeTheAI model name (env: FREETHEAI_MODEL)")
 	canopywaveKey := flag.String("canopywave-key", "", "Canopy Wave API key — Unlimited plan (env: CANOPYWAVE_API_KEY)")
@@ -325,6 +327,12 @@ func main() {
 	}
 	if *closerouterModel == "" {
 		*closerouterModel = os.Getenv("CLOSEROUTER_MODEL")
+	}
+	if env := os.Getenv("OPENROUTER_MODEL"); env != "" {
+		*openrouterModel = env
+	}
+	if env := os.Getenv("CHUTES_MODEL"); env != "" {
+		*chutesModel = env
 	}
 
 	// Setup structured logging
@@ -488,9 +496,9 @@ func main() {
 		logger.Info("LLM provider added", "name", "sambanova", "model", "Meta-Llama-3.3-70B")
 	}
 	if *openrouterKey != "" {
-		providers = append(providers, llm.NewOpenAICompatProvider("openrouter", "https://openrouter.ai/api/v1", *openrouterKey, "meta-llama/llama-3.3-70b-instruct:free"))
+		providers = append(providers, llm.NewOpenAICompatProvider("openrouter", "https://openrouter.ai/api/v1", *openrouterKey, *openrouterModel))
 		quotas = append(quotas, cost.ProviderQuota{Name: "openrouter", DailyRequests: 200})
-		logger.Info("LLM provider added", "name", "openrouter", "model", "llama-3.3-70b-instruct:free")
+		logger.Info("LLM provider added", "name", "openrouter", "model", *openrouterModel)
 	}
 	if *togetherKey != "" {
 		providers = append(providers, llm.NewOpenAICompatProvider("together", "https://api.together.xyz/v1", *togetherKey, "meta-llama/Llama-3.3-70B-Instruct-Turbo-Free"))
@@ -508,14 +516,9 @@ func main() {
 		logger.Info("LLM provider added", "name", "glhf", "model", "Llama-3.3-70B-Instruct")
 	}
 	if *chutesKey != "" {
-		providers = append(providers, llm.NewOpenAICompatProvider("chutes", "https://llm.chutes.ai/v1", *chutesKey, "meta-llama/Llama-3.3-70B-Instruct"))
+		providers = append(providers, llm.NewOpenAICompatProvider("chutes", "https://llm.chutes.ai/v1", *chutesKey, *chutesModel))
 		quotas = append(quotas, cost.ProviderQuota{Name: "chutes", DailyRequests: 200})
-		logger.Info("LLM provider added", "name", "chutes", "model", "Llama-3.3-70B-Instruct")
-	}
-	if *geminiKey != "" {
-		providers = append(providers, llm.NewGeminiProvider(*geminiKey, "gemini-2.5-flash"))
-		quotas = append(quotas, cost.ProviderQuota{Name: "gemini", DailyRequests: 1500})
-		logger.Info("LLM provider added", "name", "gemini", "model", "gemini-2.5-flash")
+		logger.Info("LLM provider added", "name", "chutes", "model", *chutesModel)
 	}
 	if *canopywaveKey != "" {
 		providers = append(providers, llm.NewOpenAICompatProvider("canopywave", "https://inference.canopywave.io/v1", *canopywaveKey, *canopywaveModel))
