@@ -130,57 +130,6 @@ var stageDefaults = map[string]stageModelCfg{
 		UncloseAI:    "hf.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q4_K_M",
 		Pollinations: "deepseek-v3",
 	},
-},
-	"reporter": {
-		Samba:     "MiniMax-M2.7",
-		FreeTheAI: "cat/gpt-5.5",
-		Canopy:    "moonshotai/kimi-k2.6",
-			LLM7:         "mistral-large-2411",
-		UncloseAI:    "hf.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q4_K_M",
-		Pollinations: "openai",
-},
-	"historian": {
-		Samba:     "gemma-3-12b-it",
-		FreeTheAI: "cat/gemini-3-flash",
-		Canopy:    "minimax/minimax-m2.5",
-			LLM7:         "mistral-small-2503",
-		UncloseAI:    "hf.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q4_K_M",
-		Pollinations: "openai",
-},
-	"gate": {
-		Samba:     "DeepSeek-V3.2",
-		FreeTheAI: "cat/claude-4-6-sonnet",
-		Canopy:    "minimax/minimax-m2.5",
-			LLM7:         "gpt-4o-mini-2024-07-18",
-		UncloseAI:    "hf.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q4_K_M",
-		Pollinations: "openai",
-},
-	"chainer": {
-		Samba:     "DeepSeek-V3.1",
-		FreeTheAI: "cat/gpt-5",
-		Canopy:    "xiaomimimo/mimo-v2.5",
-			LLM7:         "deepseek-r1-0528",
-		UncloseAI:    "hf.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q4_K_M",
-		Pollinations: "openai",
-},
-	"exploiter": {
-		Samba:       "DeepSeek-V3.2",
-		FreeTheAI:   "bbg/deepseek-ai/DeepSeek-V4-Pro",
-		Canopy:      "xiaomimimo/mimo-v2.5",
-		CloseRouter: "anthropic/claude-opus-4.7", // best code-gen for PoCs
-			LLM7:         "qwen2.5-coder-32b-instruct",
-		UncloseAI:    "hf.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q4_K_M",
-		Pollinations: "openai",
-},
-	"agent": {
-		Samba:       "DeepSeek-V3.2",
-		FreeTheAI:   "cat/claude-opus-4-7",
-		Canopy:      "moonshotai/kimi-k2.6",
-		CloseRouter: "anthropic/claude-opus-4.7", // best reasoning + tool use
-			LLM7:         "qwen2.5-coder-32b-instruct",
-		UncloseAI:    "hf.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q4_K_M",
-		Pollinations: "openai",
-}
 }
 
 // stageBuildOpts bundles every key/model knob used when constructing per-stage
