@@ -31,7 +31,7 @@ func AllTools() []ToolDef {
 		{Name: "browser_click", Description: "Click an element by CSS selector", Args: "<css_selector>"},
 		{Name: "browser_type", Description: "Type text into an input field", Args: "<css_selector> <text>"},
 		{Name: "http_get", Description: "Send HTTP GET request and return response headers + body (truncated)", Args: "<url>"},
-		{Name: "http_raw", Description: "Send raw HTTP request with custom method/headers/body", Args: "<method> <url> [header:value ...] [body:data]"},
+		{Name: "http_raw", Description: "Send raw HTTP request with custom method/headers/body. Wrap header values and bodies that contain spaces in matching \" or ' quotes. Inside a \"...\" group, escape inner double quotes as \\\", or use '...' as the outer pair.", Args: "<method> <url> [\"Header-Name: value\" ...] [\"body: payload\"]"},
 		{Name: "run_nuclei", Description: "Run nuclei scanner on a URL with optional template filter", Args: "<url> [template_filter]"},
 		{Name: "run_subfinder", Description: "Enumerate subdomains for a domain", Args: "<domain>"},
 		{Name: "run_httpx", Description: "Probe hosts for live HTTP services", Args: "<host1,host2,...>"},
@@ -139,7 +139,7 @@ func (te *ToolExecutor) Execute(ctx context.Context, tool, args string) string {
 // Browser tools — delegate to agent-browser CLI.
 
 func (te *ToolExecutor) browserOpen(ctx context.Context, url string) string {
-	url = strings.TrimSpace(url)
+	url = stripOuterQuotes(url)
 	if url == "" {
 		return "ERROR: url is required"
 	}
@@ -154,7 +154,7 @@ func (te *ToolExecutor) browserOpen(ctx context.Context, url string) string {
 }
 
 func (te *ToolExecutor) browserScreenshot(ctx context.Context, filename string) string {
-	filename = strings.TrimSpace(filename)
+	filename = stripOuterQuotes(filename)
 	if filename == "" {
 		filename = fmt.Sprintf("screenshot_%d.png", time.Now().UnixMilli())
 	}
@@ -169,7 +169,7 @@ func (te *ToolExecutor) browserScreenshot(ctx context.Context, filename string) 
 }
 
 func (te *ToolExecutor) browserEval(ctx context.Context, js string) string {
-	js = strings.TrimSpace(js)
+	js = stripOuterQuotes(js)
 	if js == "" {
 		return "ERROR: javascript code is required"
 	}
@@ -191,7 +191,7 @@ func (te *ToolExecutor) browserSnapshot(ctx context.Context) string {
 
 
 func (te *ToolExecutor) browserClick(ctx context.Context, selector string) string {
-	selector = strings.TrimSpace(selector)
+	selector = stripOuterQuotes(selector)
 	if selector == "" {
 		return "ERROR: CSS selector or @ref is required"
 	}
@@ -209,15 +209,14 @@ func (te *ToolExecutor) browserClick(ctx context.Context, selector string) strin
 }
 
 func (te *ToolExecutor) browserType(ctx context.Context, args string) string {
-	parts := strings.SplitN(strings.TrimSpace(args), " ", 2)
-	if len(parts) < 2 {
+	selector, text, ok := splitFirstField(args)
+	if !ok {
 		return "ERROR: usage: browser_type <selector_or_@ref> <text>"
 	}
-	selector := parts[0]
 	if strings.HasPrefix(selector, "e") && len(selector) > 1 && selector[1] >= '0' && selector[1] <= '9' {
 		selector = "@" + selector
 	}
-	out, err := te.runBrowserCmd(ctx, "fill", selector, parts[1])
+	out, err := te.runBrowserCmd(ctx, "fill", selector, text)
 	if err != nil {
 		return fmt.Sprintf("ERROR: %v", err)
 	}
@@ -245,7 +244,7 @@ func (te *ToolExecutor) runBrowserCmd(ctx context.Context, args ...string) (stri
 // HTTP tools.
 
 func (te *ToolExecutor) httpGet(ctx context.Context, url string) string {
-	url = strings.TrimSpace(url)
+	url = stripOuterQuotes(url)
 	if url == "" {
 		return "ERROR: url is required"
 	}
@@ -276,9 +275,9 @@ func (te *ToolExecutor) httpGet(ctx context.Context, url string) string {
 }
 
 func (te *ToolExecutor) httpRaw(ctx context.Context, args string) string {
-	parts := strings.Fields(args)
+	parts := splitArgsQuoteAware(args)
 	if len(parts) < 2 {
-		return "ERROR: usage: http_raw <method> <url> [header:value ...] [body:data]"
+		return "ERROR: usage: http_raw <method> <url> [\"Header-Name: value\" ...] [\"body: payload\"]"
 	}
 
 	method := strings.ToUpper(parts[0])
@@ -287,10 +286,19 @@ func (te *ToolExecutor) httpRaw(ctx context.Context, args string) string {
 	headers := make(map[string]string)
 
 	for _, p := range parts[2:] {
-		if strings.HasPrefix(p, "body:") {
+		switch {
+		case strings.HasPrefix(p, "body:"):
 			bodyStr = strings.TrimPrefix(p, "body:")
-		} else if idx := strings.Index(p, ":"); idx > 0 {
-			headers[p[:idx]] = p[idx+1:]
+		case strings.HasPrefix(p, "body="):
+			bodyStr = strings.TrimPrefix(p, "body=")
+		default:
+			if idx := strings.Index(p, ":"); idx > 0 {
+				name := strings.TrimSpace(p[:idx])
+				value := strings.TrimSpace(p[idx+1:])
+				if name != "" {
+					headers[name] = value
+				}
+			}
 		}
 	}
 
@@ -412,7 +420,7 @@ func (te *ToolExecutor) runReconTool(ctx context.Context, tool string, args []st
 }
 
 func (te *ToolExecutor) runCmd(ctx context.Context, cmdStr string) string {
-	cmdStr = strings.TrimSpace(cmdStr)
+	cmdStr = stripOuterQuotes(cmdStr)
 	if cmdStr == "" {
 		return "ERROR: command is required"
 	}
@@ -474,4 +482,135 @@ func truncate(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen] + "\n... [truncated]"
+}
+
+// stripOuterQuotes removes a single pair of matching outer "..." or '...'
+// quotes from s, after trimming surrounding whitespace. LLM agents frequently
+// produce actions like `ACTION: http_get "https://..."` or
+// `ACTION: run_cmd 'curl ...'`, and the response parser hands the tool the
+// quote characters as literal bytes — without this helper Go's URL / header
+// / shell parsers reject them.
+func stripOuterQuotes(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) >= 2 {
+		first, last := s[0], s[len(s)-1]
+		if (first == '"' && last == '"') || (first == '\'' && last == '\'') {
+			return s[1 : len(s)-1]
+		}
+	}
+	return s
+}
+
+// splitArgsQuoteAware splits s on unquoted whitespace, but treats "..."
+// and '...' groupings as a single field. The opening quote must be the
+// first byte of a field; the matching closing quote is the next byte
+// of the same kind that is followed by whitespace or end-of-string,
+// which makes the function robust to bodies that contain inner same-type
+// quotes (XML attributes, JSON values, etc.):
+//
+//	http_raw POST <url> "Content-Type: application/xml" "body:<?xml version=\"1.0\"?>..."
+//	http_raw POST <url> "Content-Type: application/xml" "body:<?xml version="1.0"?>..."
+//
+// both yield identical fields. Backslash-escaped quotes (\" / \') and
+// backslash-escaped backslashes (\\) inside a quoted run are unescaped.
+func splitArgsQuoteAware(s string) []string {
+	var fields []string
+	i := 0
+	for i < len(s) {
+		for i < len(s) && (s[i] == ' ' || s[i] == '\t') {
+			i++
+		}
+		if i >= len(s) {
+			break
+		}
+		if s[i] == '"' || s[i] == '\'' {
+			quote := s[i]
+			i++
+			var buf strings.Builder
+			for i < len(s) {
+				if s[i] == '\\' && i+1 < len(s) && (s[i+1] == quote || s[i+1] == '\\') {
+					buf.WriteByte(s[i+1])
+					i += 2
+					continue
+				}
+				if s[i] == quote && (i+1 == len(s) || s[i+1] == ' ' || s[i+1] == '\t') {
+					i++
+					break
+				}
+				buf.WriteByte(s[i])
+				i++
+			}
+			fields = append(fields, buf.String())
+			continue
+		}
+		start := i
+		for i < len(s) && s[i] != ' ' && s[i] != '\t' {
+			i++
+		}
+		fields = append(fields, s[start:i])
+	}
+	return fields
+}
+
+// splitFirstField pulls the first whitespace-delimited (quote-aware) field
+// off s and returns it together with the remainder. The remainder is also
+// passed through stripOuterQuotes so callers can hand the text straight
+// to a downstream binary. Returns ok=false if s has no fields.
+func splitFirstField(s string) (first, rest string, ok bool) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", "", false
+	}
+	parts := splitArgsQuoteAware(s)
+	if len(parts) == 0 {
+		return "", "", false
+	}
+	if len(parts) == 1 {
+		return parts[0], "", true
+	}
+	idx := indexAfterFirstField(s)
+	if idx < 0 {
+		return parts[0], stripOuterQuotes(strings.Join(parts[1:], " ")), true
+	}
+	return parts[0], stripOuterQuotes(s[idx:]), true
+}
+
+// indexAfterFirstField returns the byte offset in s where the second field
+// begins, using the same quote semantics as splitArgsQuoteAware so that
+// inner quotes don't terminate the first field prematurely. -1 if there
+// is no second field.
+func indexAfterFirstField(s string) int {
+	i := 0
+	for i < len(s) && (s[i] == ' ' || s[i] == '\t') {
+		i++
+	}
+	if i >= len(s) {
+		return -1
+	}
+	if s[i] == '"' || s[i] == '\'' {
+		quote := s[i]
+		i++
+		for i < len(s) {
+			if s[i] == '\\' && i+1 < len(s) && (s[i+1] == quote || s[i+1] == '\\') {
+				i += 2
+				continue
+			}
+			if s[i] == quote && (i+1 == len(s) || s[i+1] == ' ' || s[i+1] == '\t') {
+				i++
+				break
+			}
+			i++
+		}
+	} else {
+		for i < len(s) && s[i] != ' ' && s[i] != '\t' {
+			i++
+		}
+	}
+	for i < len(s) && (s[i] == ' ' || s[i] == '\t') {
+		i++
+	}
+	if i >= len(s) {
+		return -1
+	}
+	return i
 }
