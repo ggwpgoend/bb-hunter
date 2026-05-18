@@ -41,6 +41,9 @@ import (
 
 // stageModelCfg defines which model to use per provider for a given pipeline stage.
 type stageModelCfg struct {
+	Cerebras    string // fastest free reasoning tier (Qwen-3-235B); free deprecates 2026-05-27
+	Groq        string // LPU inference, Llama / Qwen / GPT-OSS catalog
+	Gemini      string // huge context (1M), good for analyst-style large-input stages
 	Samba       string
 	FreeTheAI   string
 	Canopy      string
@@ -61,7 +64,11 @@ type stageModelCfg struct {
 //   - agent:     autonomous bug hunting → best reasoning + tool use
 var stageDefaults = map[string]stageModelCfg{
 	// analyst: Deep processing of large data (scan outputs, DOMs). Needs large context + reasoning.
+	// Gemini 2.5 Flash (1M ctx) is ideal here; Cerebras / Groq cover the reasoning fallback.
 	"analyst": {
+		Cerebras:     "qwen-3-235b-a22b-instruct-2507",
+		Groq:         "llama-3.3-70b-versatile",
+		Gemini:       "gemini-2.5-flash",
 		Samba:        "DeepSeek-V3.2",
 		FreeTheAI:    "gemini-2.5-flash",
 		Canopy:       "moonshotai/kimi-k2.6", // Kimi has massive context
@@ -72,6 +79,9 @@ var stageDefaults = map[string]stageModelCfg{
 	},
 	// reporter: Writing high-quality bug bounty reports. Needs good formatting and clarity.
 	"reporter": {
+		Cerebras:     "qwen-3-235b-a22b-instruct-2507",
+		Groq:         "llama-3.3-70b-versatile",
+		Gemini:       "gemini-2.5-flash",
 		Samba:        "MiniMax-M2.7",
 		FreeTheAI:    "gemini-2.5-flash",
 		Canopy:       "moonshotai/kimi-k2.6",
@@ -82,6 +92,9 @@ var stageDefaults = map[string]stageModelCfg{
 	},
 	// historian: Diffing states, tracking what changed over time. Needs large context.
 	"historian": {
+		Cerebras:     "qwen-3-235b-a22b-instruct-2507",
+		Groq:         "llama-3.3-70b-versatile",
+		Gemini:       "gemini-2.5-flash",
 		Samba:        "gemma-3-12b-it",
 		FreeTheAI:    "gemini-2.5-flash",
 		Canopy:       "moonshotai/kimi-k2.6",
@@ -92,6 +105,9 @@ var stageDefaults = map[string]stageModelCfg{
 	},
 	// gate: Fast validation filter (7 questions). Needs speed and strict logic.
 	"gate": {
+		Cerebras:     "qwen-3-235b-a22b-instruct-2507",
+		Groq:         "llama-3.3-70b-versatile",
+		Gemini:       "gemini-2.5-flash",
 		Samba:        "DeepSeek-V3.2",
 		FreeTheAI:    "gemini-2.5-flash",
 		Canopy:       "minimax/minimax-m2.5",
@@ -102,6 +118,9 @@ var stageDefaults = map[string]stageModelCfg{
 	},
 	// chainer: Building exploit chains. Needs top-tier reasoning.
 	"chainer": {
+		Cerebras:     "qwen-3-235b-a22b-instruct-2507", // best free reasoning option
+		Groq:         "llama-3.3-70b-versatile",
+		Gemini:       "gemini-2.5-flash",
 		Samba:        "DeepSeek-V3.1",
 		FreeTheAI:    "gemini-2.5-flash",
 		Canopy:       "minimax/minimax-m2.5",
@@ -112,6 +131,9 @@ var stageDefaults = map[string]stageModelCfg{
 	},
 	// exploiter: Writing PoC code, tampers, bypasses. Needs best coding models.
 	"exploiter": {
+		Cerebras:     "qwen-3-235b-a22b-instruct-2507",
+		Groq:         "llama-3.3-70b-versatile",
+		Gemini:       "gemini-2.5-flash",
 		Samba:        "DeepSeek-V3.2",
 		FreeTheAI:    "gemini-2.5-flash",
 		Canopy:       "xiaomimimo/mimo-v2.5",
@@ -122,6 +144,9 @@ var stageDefaults = map[string]stageModelCfg{
 	},
 	// agent: The main autonomous driver. Needs absolute best tool calling and planning.
 	"agent": {
+		Cerebras:     "qwen-3-235b-a22b-instruct-2507",
+		Groq:         "llama-3.3-70b-versatile",
+		Gemini:       "gemini-2.5-flash",
 		Samba:        "DeepSeek-V3.2",
 		FreeTheAI:    "gemini-2.5-flash", // Claude Opus 4.7 is unmatched for agent tool calling
 		Canopy:       "minimax/minimax-m2.5",
@@ -136,10 +161,15 @@ var stageDefaults = map[string]stageModelCfg{
 // clients. Grouping these into a struct keeps buildStageClient's signature
 // stable as more providers (e.g. CloseRouter) are added.
 type stageBuildOpts struct {
+	CerebrasKey      string
+	GroqKey          string
+	GeminiKey        string
 	SambaKey         string
 	FreeTheAIKey     string
 	CanopyKey        string
 	CanopyFastKey    string
+	LLM7Key          string
+	UncloseAIKey     string
 	CloseRouterKey   string
 	CloseRouterModel string  // overrides stageDefaults.CloseRouter when non-empty
 	CloseRouterUSD   float64 // daily USD spending cap for CloseRouter
@@ -148,9 +178,11 @@ type stageBuildOpts struct {
 // buildStageClient creates an LLM client optimized for a specific pipeline stage.
 // It selects the best model per provider based on the stage's requirements.
 // canopyFastKey is used for speed-critical stages (analyst, gate, chainer, exploiter).
-// CloseRouter (pay-per-use) is appended FIRST so the round-robin starts with the
-// premium model on the stages that have a CloseRouter default; once its daily
-// budget is exhausted, Available()=false and the free providers take over.
+//
+// Provider order matters: round-robin walks providers in append order, so the
+// fastest / most-capable free providers are appended first. CloseRouter (when
+// configured) leads on premium stages until its daily USD budget is exhausted,
+// after which Available()=false and the free chain takes over.
 func buildStageClient(stage string, opts stageBuildOpts, logger *slog.Logger) *llm.Client {
 	cfg, ok := stageDefaults[stage]
 	if !ok {
@@ -160,7 +192,7 @@ func buildStageClient(stage string, opts stageBuildOpts, logger *slog.Logger) *l
 
 	var providers []llm.Provider
 
-	// CloseRouter first so high-quality model leads round-robin until budget runs out.
+	// CloseRouter first so the premium model leads round-robin until budget runs out.
 	crModel := opts.CloseRouterModel
 	if crModel == "" {
 		crModel = cfg.CloseRouter
@@ -168,6 +200,21 @@ func buildStageClient(stage string, opts stageBuildOpts, logger *slog.Logger) *l
 	if opts.CloseRouterKey != "" && crModel != "" {
 		providers = append(providers, llm.NewCloseRouterProvider(
 			opts.CloseRouterKey, crModel, opts.CloseRouterUSD))
+	}
+
+	// Free premium tier — Cerebras (fastest free reasoning at ~200ms, Qwen-3-235B),
+	// Groq (LPU inference at ~250-400ms), Gemini Flash (1M context, 500 RPD).
+	// These cover the role CloseRouter used to fill in dev.
+	if opts.CerebrasKey != "" && cfg.Cerebras != "" {
+		providers = append(providers, llm.NewOpenAICompatProvider(
+			"cerebras", "https://api.cerebras.ai/v1", opts.CerebrasKey, cfg.Cerebras))
+	}
+	if opts.GroqKey != "" && cfg.Groq != "" {
+		providers = append(providers, llm.NewOpenAICompatProvider(
+			"groq", "https://api.groq.com/openai/v1", opts.GroqKey, cfg.Groq))
+	}
+	if opts.GeminiKey != "" && cfg.Gemini != "" {
+		providers = append(providers, llm.NewGeminiProvider(opts.GeminiKey, cfg.Gemini))
 	}
 
 	if opts.SambaKey != "" {
@@ -192,6 +239,17 @@ func buildStageClient(stage string, opts stageBuildOpts, logger *slog.Logger) *l
 			"canopy", "https://inference.canopywave.io/v1", ck, cfg.Canopy))
 	}
 
+	// LLM7 and UncloseAI are last-resort free fallbacks; they're slower and
+	// less reliable, but help when everything else is exhausted.
+	if opts.LLM7Key != "" && cfg.LLM7 != "" {
+		providers = append(providers, llm.NewOpenAICompatProvider(
+			"llm7", "https://api.llm7.io/v1", opts.LLM7Key, cfg.LLM7))
+	}
+	if opts.UncloseAIKey != "" && cfg.UncloseAI != "" {
+		providers = append(providers, llm.NewOpenAICompatProvider(
+			"uncloseai", "https://hermes.ai.unturf.com/v1", opts.UncloseAIKey, cfg.UncloseAI))
+	}
+
 	if len(providers) == 0 {
 		return nil
 	}
@@ -201,9 +259,14 @@ func buildStageClient(stage string, opts stageBuildOpts, logger *slog.Logger) *l
 	logger.Info("stage client ready",
 		"stage", stage,
 		"providers", len(providers),
+		"cerebras", cfg.Cerebras,
+		"groq", cfg.Groq,
+		"gemini", cfg.Gemini,
 		"samba", cfg.Samba,
 		"freetheai", cfg.FreeTheAI,
 		"canopy", cfg.Canopy,
+		"llm7", cfg.LLM7,
+		"uncloseai", cfg.UncloseAI,
 		"closerouter", crModel,
 	)
 
@@ -220,10 +283,12 @@ func main() {
 	groqKey := flag.String("groq-key", "", "Groq API key (env: GROQ_API_KEY)")
 	sambaKey := flag.String("samba-key", "", "SambaNova API key (env: SAMBA_API_KEY)")
 	openrouterKey := flag.String("openrouter-key", "", "OpenRouter API key (env: OPENROUTER_API_KEY)")
+	openrouterModel := flag.String("openrouter-model", "deepseek/deepseek-v4-flash:free", "OpenRouter model name (env: OPENROUTER_MODEL). Default :free model rotates; many :free models share an upstream throttle so set OPENROUTER_MODEL or buy $10 credit to lift the limit.")
 	togetherKey := flag.String("together-key", "", "Together AI API key (env: TOGETHER_API_KEY)")
 	nvidiaNimKey := flag.String("nvidia-key", "", "NVIDIA NIM API key (env: NVIDIA_API_KEY)")
 	glhfKey := flag.String("glhf-key", "", "GLHF.chat API key (env: GLHF_API_KEY)")
 	chutesKey := flag.String("chutes-key", "", "Chutes AI API key (env: CHUTES_API_KEY)")
+	chutesModel := flag.String("chutes-model", "deepseek-ai/DeepSeek-V3.2-TEE", "Chutes AI model name (env: CHUTES_MODEL). Old default meta-llama/Llama-3.3-70B-Instruct was removed from the Chutes catalog.")
 	freetheaiKey := flag.String("freetheai-key", "", "FreeTheAI API key (env: FREETHEAI_API_KEY)")
 	freetheaiModel := flag.String("freetheai-model", "cat/gemini-3-flash", "FreeTheAI model name (env: FREETHEAI_MODEL)")
 	canopywaveKey := flag.String("canopywave-key", "", "Canopy Wave API key — Unlimited plan (env: CANOPYWAVE_API_KEY)")
@@ -325,6 +390,12 @@ func main() {
 	}
 	if *closerouterModel == "" {
 		*closerouterModel = os.Getenv("CLOSEROUTER_MODEL")
+	}
+	if env := os.Getenv("OPENROUTER_MODEL"); env != "" {
+		*openrouterModel = env
+	}
+	if env := os.Getenv("CHUTES_MODEL"); env != "" {
+		*chutesModel = env
 	}
 
 	// Setup structured logging
@@ -488,9 +559,9 @@ func main() {
 		logger.Info("LLM provider added", "name", "sambanova", "model", "Meta-Llama-3.3-70B")
 	}
 	if *openrouterKey != "" {
-		providers = append(providers, llm.NewOpenAICompatProvider("openrouter", "https://openrouter.ai/api/v1", *openrouterKey, "meta-llama/llama-3.3-70b-instruct:free"))
+		providers = append(providers, llm.NewOpenAICompatProvider("openrouter", "https://openrouter.ai/api/v1", *openrouterKey, *openrouterModel))
 		quotas = append(quotas, cost.ProviderQuota{Name: "openrouter", DailyRequests: 200})
-		logger.Info("LLM provider added", "name", "openrouter", "model", "llama-3.3-70b-instruct:free")
+		logger.Info("LLM provider added", "name", "openrouter", "model", *openrouterModel)
 	}
 	if *togetherKey != "" {
 		providers = append(providers, llm.NewOpenAICompatProvider("together", "https://api.together.xyz/v1", *togetherKey, "meta-llama/Llama-3.3-70B-Instruct-Turbo-Free"))
@@ -508,14 +579,9 @@ func main() {
 		logger.Info("LLM provider added", "name", "glhf", "model", "Llama-3.3-70B-Instruct")
 	}
 	if *chutesKey != "" {
-		providers = append(providers, llm.NewOpenAICompatProvider("chutes", "https://llm.chutes.ai/v1", *chutesKey, "meta-llama/Llama-3.3-70B-Instruct"))
+		providers = append(providers, llm.NewOpenAICompatProvider("chutes", "https://llm.chutes.ai/v1", *chutesKey, *chutesModel))
 		quotas = append(quotas, cost.ProviderQuota{Name: "chutes", DailyRequests: 200})
-		logger.Info("LLM provider added", "name", "chutes", "model", "Llama-3.3-70B-Instruct")
-	}
-	if *geminiKey != "" {
-		providers = append(providers, llm.NewGeminiProvider(*geminiKey, "gemini-2.5-flash"))
-		quotas = append(quotas, cost.ProviderQuota{Name: "gemini", DailyRequests: 1500})
-		logger.Info("LLM provider added", "name", "gemini", "model", "gemini-2.5-flash")
+		logger.Info("LLM provider added", "name", "chutes", "model", *chutesModel)
 	}
 	if *canopywaveKey != "" {
 		providers = append(providers, llm.NewOpenAICompatProvider("canopywave", "https://inference.canopywave.io/v1", *canopywaveKey, *canopywaveModel))
@@ -561,9 +627,15 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Per-stage model routing: if optimized providers (samba/freetheai/canopy/closerouter) are configured,
+	// Per-stage model routing: if any of the optimised providers is configured,
 	// build per-stage clients with optimal model selection for each pipeline stage.
-	usePerStage := *sambaKey != "" || *freetheaiKey != "" || *canopywaveKey != "" || *canopywaveFastKey != "" || *closerouterKey != ""
+	// Cerebras / Groq / Gemini are first-class here so that dev runs can drop
+	// CloseRouter entirely and still get strong per-stage routing.
+	usePerStage := *cerebrasKey != "" || *groqKey != "" || *geminiKey != "" ||
+		*sambaKey != "" || *freetheaiKey != "" ||
+		*canopywaveKey != "" || *canopywaveFastKey != "" ||
+		*llm7Key != "" || *uncloseaiKey != "" ||
+		*closerouterKey != ""
 	var (
 		analystLLM   *llm.Client
 		reporterLLM  *llm.Client
@@ -573,10 +645,15 @@ func main() {
 		exploiterLLM *llm.Client
 	)
 	stageOpts := stageBuildOpts{
+		CerebrasKey:      *cerebrasKey,
+		GroqKey:          *groqKey,
+		GeminiKey:        *geminiKey,
 		SambaKey:         *sambaKey,
 		FreeTheAIKey:     *freetheaiKey,
 		CanopyKey:        *canopywaveKey,
 		CanopyFastKey:    *canopywaveFastKey,
+		LLM7Key:          *llm7Key,
+		UncloseAIKey:     *uncloseaiKey,
 		CloseRouterKey:   *closerouterKey,
 		CloseRouterModel: *closerouterModel,
 		CloseRouterUSD:   *closerouterBudget,
