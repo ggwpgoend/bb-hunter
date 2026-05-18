@@ -43,6 +43,13 @@ type Request struct {
 
 	// Sentinel UUID embedded in system prompt for prompt injection detection
 	SentinelUUID string `json:"-"`
+
+	// DisableThinking suppresses chain-of-thought / "thinking" tokens for
+	// providers that emit them (e.g. Gemini 2.5+). Without this flag, a small
+	// MaxTokens budget can be entirely consumed by thinking tokens, leaving
+	// no room for the visible answer. Used by health checks where MaxTokens
+	// is intentionally tiny. Providers that don't support thinking ignore it.
+	DisableThinking bool `json:"-"`
 }
 
 // Response is the output from a completion call.
@@ -159,8 +166,12 @@ func (c *Client) CheckHealth(ctx context.Context) []HealthResult {
 		checkCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 		req := &Request{
 			Messages:    []Message{{Role: RoleUser, Content: "Reply with exactly: ok"}},
-			MaxTokens:   4,
-			Temperature: 0,
+			// 16 tokens is enough for "ok" on every provider while still
+			// keeping the probe cheap. DisableThinking covers Gemini 2.5+,
+			// where thinking tokens would otherwise consume the budget.
+			MaxTokens:       16,
+			Temperature:     0,
+			DisableThinking: true,
 		}
 
 		resp, err := p.Complete(checkCtx, req)

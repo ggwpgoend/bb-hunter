@@ -64,9 +64,17 @@ type geminiPart struct {
 }
 
 type geminiGenerationConfig struct {
-	MaxOutputTokens int     `json:"maxOutputTokens,omitempty"`
-	Temperature     float64 `json:"temperature,omitempty"`
-	ResponseMimeType string `json:"responseMimeType,omitempty"`
+	MaxOutputTokens  int                    `json:"maxOutputTokens,omitempty"`
+	Temperature      float64                `json:"temperature,omitempty"`
+	ResponseMimeType string                 `json:"responseMimeType,omitempty"`
+	ThinkingConfig   *geminiThinkingConfig  `json:"thinkingConfig,omitempty"`
+}
+
+// geminiThinkingConfig controls chain-of-thought ("thinking") tokens on
+// Gemini 2.5+ models. ThinkingBudget=0 disables thinking entirely so that
+// MaxOutputTokens is spent on the visible answer.
+type geminiThinkingConfig struct {
+	ThinkingBudget *int `json:"thinkingBudget,omitempty"`
 }
 
 // geminiResponse is the Gemini API response format.
@@ -127,6 +135,10 @@ func (g *GeminiProvider) Complete(ctx context.Context, req *Request) (*Response,
 	if req.JSONMode {
 		cfg.ResponseMimeType = "application/json"
 	}
+	if req.DisableThinking {
+		zero := 0
+		cfg.ThinkingConfig = &geminiThinkingConfig{ThinkingBudget: &zero}
+	}
 	gemReq.GenerationConfig = cfg
 
 	body, err := json.Marshal(gemReq)
@@ -174,7 +186,10 @@ func (g *GeminiProvider) Complete(ctx context.Context, req *Request) (*Response,
 	}
 
 	if len(gemResp.Candidates) == 0 || len(gemResp.Candidates[0].Content.Parts) == 0 {
-		return nil, fmt.Errorf("gemini: empty response")
+		// Gemini 2.5+ thinking models can consume the entire MaxOutputTokens
+		// budget on internal "thinking" tokens, returning candidates with no
+		// visible text. Surface a hint so callers can react.
+		return nil, fmt.Errorf("gemini: empty response (raise MaxTokens or set DisableThinking)")
 	}
 
 	content := gemResp.Candidates[0].Content.Parts[0].Text
