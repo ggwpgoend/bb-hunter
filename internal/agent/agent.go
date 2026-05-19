@@ -40,6 +40,7 @@ type Agent struct {
 	display  *Display
 	log      *slog.Logger
 	history  []llm.Message
+	reflect  *reflectState
 
 	// stopRequested is set to 1 by RequestStop() to signal the run loop to
 	// wind down gracefully. The loop runs at most StopGraceSteps more turns
@@ -64,6 +65,7 @@ func New(cfg Config) *Agent {
 		executor: NewToolExecutor(cfg.AgentBrowserBin, cfg.ScreenshotDir, cfg.ProxyAddr),
 		display:  NewDisplay(),
 		log:      cfg.Logger,
+		reflect:  newReflectState(),
 	}
 }
 
@@ -83,34 +85,65 @@ func (a *Agent) StopRequested() bool {
 
 const agentSystemPrompt = `You are an expert autonomous bug bounty hunter. Your goal is to find REAL, EXPLOITABLE vulnerabilities on the target.
 
+## Available Tools
+%s
+
 ## Response Format
-Every turn you MUST output exactly:
-THINK: <your detailed reasoning — what you learned, what you suspect, what to try next>
+Every turn you MUST output EXACTLY this structure, with ACTION: on its own line:
+
+THINK: <reasoning>
 ACTION: <tool_name> <arguments>
 
+Do not wrap the block in code fences. Do not put "ACTION:" inside the THINK content; always start a new line for ACTION:.
+
+## THINK Discipline
+1. At the start of every THINK, scan back through the conversation history and re-read any prior "HYPOTHESIS:" lines you emitted. Carry them forward in your reasoning — they are your working memory and survive context trimming.
+2. Do NOT repeat what you already said in earlier THINKs. Push the reasoning forward.
+3. Keep THINK focused: what changed in the last observation, what you now believe, what concrete next action follows from that belief.
+
+## HYPOTHESIS Contract
+Whenever you suspect (even weakly) a specific vulnerability, emit a separate line in your THINK block in this exact format:
+
+HYPOTHESIS: <vuln_class> @ <url> :: <one-sentence reasoning>
+
+Examples:
+HYPOTHESIS: idor @ https://t.example.com/api/v1/users/42 :: numeric id, no auth header sent on request, response body changed when id varied
+HYPOTHESIS: reflected_xss @ https://t.example.com/search?q= :: payload "<svg/onload=alert(1)>" reflected unencoded in response
+
+These lines are your durable memory. You MUST emit them when you have a working theory — even before you have proof.
+
 ## Tools Policy & Freedom
-You have access to a variety of tools (HTTP, Browser, Katana, Nuclei, Cmd).
-Do not blindly trust tools; use them to gather data, but do the deep reasoning yourself.
-1. You may use run_katana or run_subfinder to quickly gather endpoints. Analyze the output deeply.
-2. When testing an endpoint, do NOT wait. Test it immediately (SQLi, XSS, SSRF, IDOR).
-3. Think DEEPLY. If you get a result, read it carefully and form an attack hypothesis.
-4. If you need to write custom exploits or complex data processing, use run_cmd to execute python, node, or bash scripts. You have full freedom to build and run custom code.
+You have HTTP, Browser, Katana, Nuclei, Cmd tools. Use them to GATHER data; do the reasoning yourself.
+1. Use run_katana / run_subfinder to discover endpoints. Read their output carefully — it usually contains the real attack surface.
+2. When testing endpoints, prefer the MOST PROMISING one first based on recon evidence (parameters in URL, suspicious paths like /admin /api/v1/users/<id>, error messages, redirected responses). Do not parallel-test guessed-at endpoints — confirm they exist first.
+3. Prefer http_get / http_raw for endpoint probing. Use browser_* tools ONLY when you need JavaScript execution, client-side routing, or DOM-based behaviour. Browser tools are slow and lossy.
+4. 4xx/5xx responses are signal, not noise. Read the headers (Location, WWW-Authenticate, Set-Cookie, X-CSRF-Token, Content-Type) and the first chunk of the body — they tell you what the server expects.
+5. If you need custom exploit logic or data processing, use run_cmd to execute python/node/bash. You have full freedom to write and run code.
 
 ## Browser Usage (agent-browser)
-The browser_snapshot tool returns an accessibility tree. Elements are marked with references like [@e30].
-To interact with them, you can pass the reference DIRECTLY to the tools:
+browser_snapshot returns an accessibility tree. Elements are marked like [@e30]. Pass refs directly:
 - browser_click @e30
 - browser_type @e4 my text
 - browser_eval document.querySelector('form').submit()
 
-Always use browser_snapshot -i after a page load to get the updated [@e] references.
+After ANY browser_click, ALWAYS verify that navigation actually happened. Run:
+  ACTION: browser_eval window.location.href
+If the URL is unchanged AND the element had an href attribute, the click was swallowed by the SPA router. Recover with:
+  ACTION: browser_open <the href value>
+Do NOT repeat the same browser_click — it will fail again.
 
-## Reporting
-The MOMENT you have evidence of a vulnerability, call report_finding IMMEDIATELY.
-Format: ACTION: report_finding { "vuln_class": "XSS", "severity": "high", "url": "...", "description": "...", "evidence": "..." }
-If you mess up the JSON format, don't worry, the system will extract your description. But try your best to provide valid JSON.
+Always call browser_snapshot -i after a page load to refresh the [@e] references.
 
-%s`
+## Reporting Cadence
+The MOMENT you have evidence (reflected payload, SQL error, leaked data, auth bypass, open redirect, prototype pollution, etc.) call report_finding IMMEDIATELY on the next turn. Do not batch findings.
+
+Format:
+ACTION: report_finding {"vuln_class": "xss", "severity": "high", "url": "...", "description": "...", "evidence": "..."}
+
+If your JSON is malformed, the system will extract your description anyway — but try to keep it valid.
+
+## Anti-Loop Discipline
+If you see a "SYSTEM NOTE:" message in the conversation, the run loop has detected that you are stuck (repeating an action, oscillating between two tools, or producing repeated errors). When you see one, you MUST change at least one of: (a) the tool, (b) the target URL/endpoint, (c) the vuln class you are probing. Do NOT retry the same action with cosmetic changes (different casing, trailing slash, etc.) — that does not break the loop.`
 
 // Run starts the autonomous agent loop.
 func (a *Agent) Run(ctx context.Context) ([]Finding, error) {
@@ -234,9 +267,16 @@ func (a *Agent) Run(ctx context.Context) ([]Finding, error) {
 
 		if tool == "" {
 			a.display.Error("LLM did not output a valid ACTION. Nudging...")
+			note, ok := a.reflect.Observe(step, "", "", resultNoAction)
+			nudge := "You must output THINK: followed by ACTION: on the next line. Please try again with a valid action."
+			if ok {
+				a.log.Info("agent: reflection injected", "step", step, "trigger", "no_action")
+				a.display.Info(note)
+				nudge = note
+			}
 			a.history = append(a.history, llm.Message{
 				Role:    llm.RoleUser,
-				Content: "You must output THINK: followed by ACTION: on the next line. Please try again with a valid action.",
+				Content: nudge,
 			})
 			continue
 		}
@@ -278,6 +318,21 @@ func (a *Agent) Run(ctx context.Context) ([]Finding, error) {
 			Content: fmt.Sprintf("OBSERVATION: %s", observation),
 		})
 
+		// Reflection: record this turn, inject a SYSTEM NOTE if a loop/error
+		// pattern was detected.
+		result := resultOK
+		if strings.HasPrefix(observation, "ERROR:") {
+			result = resultErr
+		}
+		if note, ok := a.reflect.Observe(step, tool, args, result); ok {
+			a.log.Info("agent: reflection injected", "step", step, "tool", tool, "result", result)
+			a.display.Info(note)
+			a.history = append(a.history, llm.Message{
+				Role:    llm.RoleUser,
+				Content: note,
+			})
+		}
+
 		// Trim history if too long (keep system + last N messages)
 		a.trimHistory()
 	}
@@ -300,6 +355,13 @@ func (a *Agent) buildInitialPrompt() string {
 }
 
 // parseResponse extracts THINK and ACTION from LLM output.
+//
+// Handles both multi-line and single-line formats:
+//
+//	THINK: reasoning        (multi-line, standard)
+//	ACTION: tool args
+//
+//	THINK: reasoning ACTION: tool args   (single-line, some models)
 func parseResponse(content string) (think, tool, args string) {
 	lines := strings.Split(content, "\n")
 
@@ -309,7 +371,28 @@ func parseResponse(content string) (think, tool, args string) {
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
 
-		// Check for THINK:
+		// Check for an embedded ACTION: marker anywhere in the line.
+		// This catches the single-line "THINK: ... ACTION: ..." pattern
+		// and standalone "ACTION: ..." lines alike.
+		if actionIdx := findActionMarker(trimmed); actionIdx >= 0 {
+			before := strings.TrimSpace(trimmed[:actionIdx])
+			actionContent := strings.TrimSpace(trimmed[actionIdx+len("ACTION:"):])
+
+			// Carry over any text before ACTION: as THINK content.
+			if strings.HasPrefix(before, "THINK:") {
+				thought := strings.TrimSpace(strings.TrimPrefix(before, "THINK:"))
+				if thought != "" {
+					thinkLines = append(thinkLines, thought)
+				}
+			} else if inThink && before != "" {
+				thinkLines = append(thinkLines, before)
+			}
+
+			tool, args = splitToolArgs(actionContent)
+			break
+		}
+
+		// No ACTION: on this line — check for THINK: start.
 		if strings.HasPrefix(trimmed, "THINK:") {
 			inThink = true
 			thought := strings.TrimSpace(strings.TrimPrefix(trimmed, "THINK:"))
@@ -319,19 +402,7 @@ func parseResponse(content string) (think, tool, args string) {
 			continue
 		}
 
-		// Check for ACTION:
-		if strings.HasPrefix(trimmed, "ACTION:") {
-			inThink = false
-			action := strings.TrimSpace(strings.TrimPrefix(trimmed, "ACTION:"))
-			parts := strings.SplitN(action, " ", 2)
-			tool = strings.TrimSpace(parts[0])
-			if len(parts) > 1 {
-				args = strings.TrimSpace(parts[1])
-			}
-			break
-		}
-
-		// Continuation of THINK
+		// Continuation of THINK block.
 		if inThink && trimmed != "" {
 			thinkLines = append(thinkLines, trimmed)
 		}
@@ -339,6 +410,42 @@ func parseResponse(content string) (think, tool, args string) {
 
 	think = strings.Join(thinkLines, " ")
 	return
+}
+
+// findActionMarker returns the byte index of an "ACTION:" token in s that
+// acts as a real marker: preceded by whitespace (or at position 0) AND
+// followed by whitespace (or at end of string). This avoids false positives
+// like "ACTION:Forbidden" inside THINK text.
+// Returns -1 if no valid marker is found.
+func findActionMarker(s string) int {
+	const marker = "ACTION:"
+	mLen := len(marker)
+	n := len(s)
+	for i := 0; i+mLen <= n; i++ {
+		if s[i:i+mLen] != marker {
+			continue
+		}
+		if i > 0 && s[i-1] != ' ' && s[i-1] != '\t' {
+			continue
+		}
+		afterIdx := i + mLen
+		if afterIdx < n && s[afterIdx] != ' ' && s[afterIdx] != '\t' {
+			continue
+		}
+		return i
+	}
+	return -1
+}
+
+// splitToolArgs splits "tool_name args..." into tool and args.
+func splitToolArgs(action string) (string, string) {
+	parts := strings.SplitN(action, " ", 2)
+	t := strings.TrimSpace(parts[0])
+	a := ""
+	if len(parts) > 1 {
+		a = strings.TrimSpace(parts[1])
+	}
+	return t, a
 }
 
 // trimHistory keeps conversation manageable by removing old messages.
