@@ -42,6 +42,13 @@ type Agent struct {
 	history  []llm.Message
 	reflect  *reflectState
 
+	// mem is the agent's durable working memory: a session-scoped store of
+	// HYPOTHESIS lines emitted in THINK blocks. It is injected at the top
+	// of every LLM call as a leading user message so the agent's working
+	// theories survive history trimming. session_id is a UUID generated
+	// once in New() and is stable across the whole run.
+	mem *workingMemory
+
 	// stopRequested is set to 1 by RequestStop() to signal the run loop to
 	// wind down gracefully. The loop runs at most StopGraceSteps more turns
 	// after the flag flips, then exits regardless.
@@ -60,13 +67,26 @@ func New(cfg Config) *Agent {
 	if cfg.LLMDelayMs <= 0 {
 		cfg.LLMDelayMs = 3000
 	}
-	return &Agent{
+	a := &Agent{
 		cfg:      cfg,
 		executor: NewToolExecutor(cfg.AgentBrowserBin, cfg.ScreenshotDir, cfg.ProxyAddr),
 		display:  NewDisplay(),
 		log:      cfg.Logger,
 		reflect:  newReflectState(),
+		mem:      newWorkingMemory(0),
 	}
+	a.log.Debug("agent: session initialised", "session_id", a.mem.SessionID())
+	return a
+}
+
+// SessionID returns the UUID assigned to this agent's working-memory
+// session. Stable for the lifetime of the agent; useful for log correlation
+// and future cross-session persistence (24/7 mode).
+func (a *Agent) SessionID() string {
+	if a.mem == nil {
+		return ""
+	}
+	return a.mem.SessionID()
 }
 
 // RequestStop signals a graceful shutdown: the agent will receive a
@@ -212,10 +232,13 @@ func (a *Agent) Run(ctx context.Context) ([]Finding, error) {
 			})
 		}
 
-		// Call LLM
+		// Call LLM. Each call materialises a fresh message list with the
+		// [WORKING MEMORY] block injected right after the system prompt
+		// (and before the initial user prompt) so it survives history trims.
 		llmStart := time.Now()
+		messages := a.buildLLMMessages()
 		resp, err := a.cfg.LLMClient.Complete(ctx, &llm.Request{
-			Messages:    a.history,
+			Messages:    messages,
 			MaxTokens:   1024,
 			Temperature: 0.2,
 		})
@@ -225,7 +248,7 @@ func (a *Agent) Run(ctx context.Context) ([]Finding, error) {
 			// Rate-limit aware retry: wait longer
 			time.Sleep(10 * time.Second)
 			resp, err = a.cfg.LLMClient.Complete(ctx, &llm.Request{
-				Messages:    a.history,
+				Messages:    a.buildLLMMessages(),
 				MaxTokens:   1024,
 				Temperature: 0.2,
 			})
@@ -234,7 +257,7 @@ func (a *Agent) Run(ctx context.Context) ([]Finding, error) {
 				a.display.Error(fmt.Sprintf("LLM retry failed: %v — retrying in 30s...", err))
 				time.Sleep(30 * time.Second)
 				resp, err = a.cfg.LLMClient.Complete(ctx, &llm.Request{
-					Messages:    a.history,
+					Messages:    a.buildLLMMessages(),
 					MaxTokens:   1024,
 					Temperature: 0.2,
 				})
@@ -263,6 +286,11 @@ func (a *Agent) Run(ctx context.Context) ([]Finding, error) {
 
 		if think != "" {
 			a.display.Think(think, resp.Provider)
+		}
+
+		// Working memory: harvest HYPOTHESIS: lines from this THINK block.
+		if added := a.mem.Observe(think); added > 0 {
+			a.log.Debug("agent: working memory grew", "new_hypotheses", added, "total", a.mem.Len())
 		}
 
 		if tool == "" {
@@ -342,6 +370,30 @@ endLoop:
 	a.display.Summary(len(findings), a.display.step, time.Since(startTime))
 
 	return findings, nil
+}
+
+// buildLLMMessages returns the message slice for one LLM call. It inserts
+// the working-memory block (if any hypotheses exist) right after the system
+// prompt and before the running history so it sits high in the model's
+// attention window AND survives any future trimHistory pass — the block is
+// re-built on every call and never stored in a.history.
+func (a *Agent) buildLLMMessages() []llm.Message {
+	block := ""
+	if a.mem != nil {
+		block = a.mem.Block()
+	}
+	if block == "" {
+		return a.history
+	}
+	out := make([]llm.Message, 0, len(a.history)+1)
+	if len(a.history) > 0 {
+		out = append(out, a.history[0]) // system
+		out = append(out, llm.Message{Role: llm.RoleUser, Content: block})
+		out = append(out, a.history[1:]...)
+	} else {
+		out = append(out, llm.Message{Role: llm.RoleUser, Content: block})
+	}
+	return out
 }
 
 func (a *Agent) buildInitialPrompt() string {
