@@ -271,7 +271,7 @@ func (te *ToolExecutor) httpGet(ctx context.Context, url string) string {
 	sb.WriteString("\n")
 	sb.WriteString(string(body))
 
-	return truncate(sb.String(), 80000)
+	return truncate(filterHTTPObservation(sb.String()), 80000)
 }
 
 func (te *ToolExecutor) httpRaw(ctx context.Context, args string) string {
@@ -332,7 +332,7 @@ func (te *ToolExecutor) httpRaw(ctx context.Context, args string) string {
 	sb.WriteString("\n")
 	sb.WriteString(string(body))
 
-	return truncate(sb.String(), 80000)
+	return truncate(filterHTTPObservation(sb.String()), 80000)
 }
 
 // Recon tools — delegate to installed CLI tools.
