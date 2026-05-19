@@ -67,15 +67,18 @@ const reportSystemPrompt = `Ты — профессиональный иссле
 Конкретные технические рекомендации.
 
 ## Severity
-Обоснование уровня критичности по CVSS или аналогичной метрике.
+Обоснование уровня критичности + CVSS вектор в формате:
+CVSS:3.1/<vector_string> (X.X)
 
 Правила:
 - Пиши на русском языке
 - Будь техничным и конкретным
 - Не приукрашивай — объективно оценивай severity
 - Включай конкретные URL, параметры, endpoints
-- Не включай payload'ы, которые могут нанести ущерб
+- Безопасные canary payload'ы разрешены в отчёте (alert(1), sleep-based SQLi, canary-строки) — они показывают proof
+- Не включай деструктивные или опасные payload'ы (eval, exec, cookie theft)
 - Missing headers без контекста = info, не пиши длинный отчёт
+- Всегда указывай CVSS:3.1 вектор в секции Severity
 `
 
 // GenerateReport creates a markdown report for a finding.

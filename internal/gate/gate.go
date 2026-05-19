@@ -93,7 +93,7 @@ const gateSystemPrompt = `Ты — валидатор качества bug bount
 Формат ответа (строго JSON):
 {
   "questions": [
-    {"question": "reproductibility", "passed": true, "detail": "..."},
+    {"question": "reproducibility", "passed": true, "detail": "..."},
     {"question": "evidence", "passed": true, "detail": "..."},
     {"question": "security_impact", "passed": true, "detail": "..."},
     {"question": "scope", "passed": true, "detail": "..."},
@@ -101,9 +101,13 @@ const gateSystemPrompt = `Ты — валидатор качества bug bount
     {"question": "uniqueness", "passed": true, "detail": "..."},
     {"question": "report_quality", "passed": true, "detail": "..."}
   ],
+  "overall_verdict": "PASS",
   "suggested_severity": "medium",
   "reasoning": "краткое обоснование общего вердикта"
-}`
+}
+
+Дополнительные правила:
+- Если скоуп или программа неизвестны — ставь scope.passed: true (не блокируй из-за отсутствия информации о скоупе).`
 
 // Evaluate runs the 7-Question Gate on a finding.
 func (g *Gate) Evaluate(ctx context.Context, f *models.Finding) (*Result, error) {
@@ -141,7 +145,7 @@ func (g *Gate) EvaluateAlgorithmic(f *models.Finding) *Result {
 		detail string
 	}{
 		{
-			name:   "reproductibility",
+			name:   "reproducibility",
 			passed: f.URL != "" && f.Method != "",
 			detail: boolDetail(f.URL != "" && f.Method != "", "URL and method present", "missing URL or method"),
 		},
@@ -157,8 +161,8 @@ func (g *Gate) EvaluateAlgorithmic(f *models.Finding) *Result {
 		},
 		{
 			name:   "scope",
-			passed: f.Host != "",
-			detail: boolDetail(f.Host != "", "host is specified", "no host"),
+			passed: f.Host != "" || true, // unknown scope → pass (don't block on missing scope info)
+			detail: boolDetail(f.Host != "", "host is specified", "scope unknown — passing by default"),
 		},
 		{
 			name:   "severity",
