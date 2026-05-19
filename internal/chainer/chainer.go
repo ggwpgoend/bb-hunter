@@ -30,6 +30,7 @@ type Chain struct {
 	Impact      string       `json:"impact"`       // overall impact description
 	Severity    string       `json:"severity"`      // combined severity (usually higher than individual)
 	Confidence  float64      `json:"confidence"`    // 0.0–1.0
+	Priority    int          `json:"priority"`      // 1=critical, 2=interesting, 3=informational
 	PatternUsed string       `json:"pattern_used"`  // which known pattern matched
 }
 
@@ -222,19 +223,23 @@ func (c *Chainer) findAlgorithmic(findings []*models.Finding) []Chain {
 					continue
 				}
 
-				sameHost := f1.Host == f2.Host
-				confidence := 0.5
-				if sameHost {
-					confidence = 0.8
+				sameOrg := sameOrganization(f1.Host, f2.Host)
+				confidence := 0.4
+				if f1.Host == f2.Host {
+					confidence = 0.75
+				} else if sameOrg {
+					confidence = 0.6
 				}
 
 				chainID++
+				priority := inferPriority(pattern.Severity)
 				chain := Chain{
 					ID:          fmt.Sprintf("chain-%d", chainID),
 					Name:        pattern.Name,
 					Severity:    pattern.Severity,
 					Impact:      pattern.Impact,
 					Confidence:  confidence,
+					Priority:    priority,
 					PatternUsed: pattern.Name,
 				}
 
@@ -272,8 +277,8 @@ const chainerSystemPrompt = `Ты — эксперт по exploit chain building
 Правила:
 1. Цепочка должна состоять из 2+ шагов
 2. Каждый шаг использует реальную найденную уязвимость
-3. Цепочка должна увеличивать общий impactотносительно каждой уязвимости по отдельности
-4. Только уязвимости на одном хосте или связанных хостах (same organization)
+3. Цепочка должна увеличивать общий impact относительно каждой уязвимости по отдельности
+4. Уязвимости в рамках одной организации (same organization) допустимы — кросс-субдоменные цепочки валидны (например, admin.example.com → api.example.com)
 5. Будь реалистичен — не выдумывай цепочки которые нельзя выполнить
 
 Формат ответа (JSON массив):
@@ -286,9 +291,17 @@ const chainerSystemPrompt = `Ты — эксперт по exploit chain building
     ],
     "impact": "Full remote code execution via SSRF chain",
     "severity": "critical",
-    "confidence": 0.7
+    "confidence": 0.5,
+    "priority": 1
   }
 ]
+
+Поле priority:
+- 1 = critical chain (непосредственная угроза, high/critical impact)
+- 2 = interesting (стоит проверить, medium impact)
+- 3 = informational (теоретически возможно, low impact)
+
+confidence — оценивай реалистично на основе доказательств. Не привязывайся к какому-то одному значению.
 
 Если цепочек нет — верни пустой массив [].`
 
@@ -385,6 +398,39 @@ func deduplicateChains(chains []Chain) []Chain {
 	}
 
 	return result
+}
+
+// sameOrganization returns true if two hosts belong to the same organization
+// (i.e. share the same registered domain, allowing cross-subdomain chains).
+func sameOrganization(h1, h2 string) bool {
+	if h1 == "" || h2 == "" {
+		return false
+	}
+	return baseDomain(h1) == baseDomain(h2)
+}
+
+// baseDomain extracts the registered domain from a host (e.g. "api.example.com" → "example.com").
+func baseDomain(host string) string {
+	host = strings.ToLower(strings.TrimSpace(host))
+	parts := strings.Split(host, ".")
+	if len(parts) <= 2 {
+		return host
+	}
+	return strings.Join(parts[len(parts)-2:], ".")
+}
+
+// inferPriority maps a severity string to a priority level.
+func inferPriority(severity string) int {
+	switch strings.ToLower(severity) {
+	case "critical":
+		return 1
+	case "high":
+		return 1
+	case "medium":
+		return 2
+	default:
+		return 3
+	}
 }
 
 func extractJSON(s string) string {

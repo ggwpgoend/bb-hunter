@@ -69,12 +69,21 @@ For each finding, output a JSON object with these fields:
   "reasoning": "step-by-step reasoning for your classification"
 }
 
+Output MUST be raw JSON — do NOT wrap in markdown code blocks.
+
+Confidence anchors (use these ranges strictly):
+- 0.15–0.25: weak signal, no confirmed impact (e.g. missing headers, generic template match)
+- 0.35–0.5: plausible but unverified (e.g. reflected input without execution proof, single timing anomaly)
+- 0.8+: confirmed with concrete evidence (e.g. response body proves injection, canary reflected in JS sink)
+
 Rules:
-- Missing security headers alone = info severity, confidence < 0.3
-- Generic nuclei template matches without concrete evidence = low confidence
-- Reflected input without proof of execution = medium confidence at best
-- Time-based blind injections need consistent delays to be high confidence
+- Missing security headers alone = info severity, confidence 0.15–0.25
+- Generic nuclei template matches without concrete evidence = confidence 0.15–0.25
+- Reflected input without proof of execution = confidence 0.35–0.5 at best
+- Time-based blind injections need consistent delays (3+ consistent measurements) for confidence 0.8+
 - Always consider the template context and matched evidence
+- DOM XSS: emit ONLY when user input is reflected into a JavaScript sink (innerHTML, eval, document.write, etc.). Static <script> tags on the page are NOT evidence of DOM XSS
+- Chain awareness: if this finding depends on a precondition from another vulnerability (e.g. "requires SSRF to reach internal endpoint"), name the dependency explicitly in the hypothesis
 `
 
 // Analyze classifies a finding using the LLM.

@@ -124,7 +124,7 @@ func TestParseResponse_ValidJSON(t *testing.T) {
 
 	jsonResp := `{
 		"questions": [
-			{"question": "reproductibility", "passed": true, "detail": "URL provided"},
+			{"question": "reproducibility", "passed": true, "detail": "URL provided"},
 			{"question": "evidence", "passed": true, "detail": "nuclei template match"},
 			{"question": "security_impact", "passed": true, "detail": "XSS allows script injection"},
 			{"question": "scope", "passed": true, "detail": "domain in scope"},
@@ -157,7 +157,7 @@ func TestParseResponse_LowScore(t *testing.T) {
 
 	jsonResp := `{
 		"questions": [
-			{"question": "reproductibility", "passed": false, "detail": "no steps"},
+			{"question": "reproducibility", "passed": false, "detail": "no steps"},
 			{"question": "evidence", "passed": false, "detail": "none"},
 			{"question": "security_impact", "passed": false, "detail": "info only"},
 			{"question": "scope", "passed": true, "detail": "ok"},

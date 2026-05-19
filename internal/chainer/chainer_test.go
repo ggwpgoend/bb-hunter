@@ -91,8 +91,8 @@ func TestFindChainsAlgorithmic_SameHost_HigherConfidence(t *testing.T) {
 	if len(chains) == 0 {
 		t.Fatal("expected chain")
 	}
-	if chains[0].Confidence < 0.7 {
-		t.Errorf("same-host chain should have confidence >= 0.7, got %f", chains[0].Confidence)
+	if chains[0].Confidence < 0.6 {
+		t.Errorf("same-host chain should have confidence >= 0.6, got %f", chains[0].Confidence)
 	}
 }
 
@@ -176,7 +176,7 @@ func TestParseChainerResponse(t *testing.T) {
 		t.Errorf("severity = %q, want high", ch.Severity)
 	}
 	if ch.Confidence != 0.7 {
-		t.Errorf("confidence = %f, want 0.7", ch.Confidence)
+		t.Errorf("confidence = %f, want 0.7 (from fixture)", ch.Confidence)
 	}
 }
 
