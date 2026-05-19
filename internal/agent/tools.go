@@ -36,6 +36,8 @@ func AllTools() []ToolDef {
 		{Name: "run_subfinder", Description: "Enumerate subdomains for a domain", Args: "<domain>"},
 		{Name: "run_httpx", Description: "Probe hosts for live HTTP services", Args: "<host1,host2,...>"},
 		{Name: "run_katana", Description: "Crawl a URL and discover endpoints", Args: "<url> [depth]"},
+		{Name: "run_ffuf", Description: "Fuzz a URL with a wordlist (path discovery). URL must contain FUZZ.", Args: "<url> <wordlist_path> [filter_status_codes]"},
+		{Name: "build_wordlist", Description: "Write a wordlist file from inline newline-separated paths.", Args: "<output_path>\\n<path1>\\n<path2>..."},
 		{Name: "run_cmd", Description: "Run an arbitrary shell command (recon only, no destructive ops)", Args: "<command>"},
 		{Name: "report_finding", Description: "Report a discovered vulnerability", Args: "<json: {vuln_class, severity, url, description, evidence}>"},
 		{Name: "done", Description: "Finish the agent session and summarize results", Args: "[summary]"},
@@ -125,6 +127,10 @@ func (te *ToolExecutor) Execute(ctx context.Context, tool, args string) string {
 		return te.runHttpx(ctx, args)
 	case "run_katana":
 		return te.runKatana(ctx, args)
+	case "run_ffuf":
+		return te.runFfuf(ctx, args)
+	case "build_wordlist":
+		return te.buildWordlistTool(args)
 	case "run_cmd":
 		return te.runCmd(ctx, args)
 	case "report_finding":
