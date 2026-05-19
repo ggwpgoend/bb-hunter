@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 )
@@ -116,6 +117,7 @@ func (c *Client) Complete(ctx context.Context, req *Request) (*Response, error) 
 		p := c.providers[idx]
 
 		if !p.Available() {
+			slog.Debug("llm: provider skipped (not available)", "provider", p.Name(), "model", p.Model())
 			continue
 		}
 

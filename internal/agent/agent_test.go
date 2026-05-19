@@ -56,6 +56,41 @@ func TestParseResponse(t *testing.T) {
 			wantTool:  "",
 			wantArgs:  "",
 		},
+		{
+			name:      "single-line think and action",
+			input:     "THINK: I will test sqli ACTION: http_get https://example.com/?id=1",
+			wantThink: "I will test sqli",
+			wantTool:  "http_get",
+			wantArgs:  "https://example.com/?id=1",
+		},
+		{
+			name:      "action only, no think",
+			input:     "ACTION: browser_open https://example.com",
+			wantThink: "",
+			wantTool:  "browser_open",
+			wantArgs:  "https://example.com",
+		},
+		{
+			name:      "continuation line with embedded action",
+			input:     "THINK: First thought\nSecond thought ACTION: http_get https://example.com",
+			wantThink: "First thought Second thought",
+			wantTool:  "http_get",
+			wantArgs:  "https://example.com",
+		},
+		{
+			name:      "ACTION: without space after colon is not a marker",
+			input:     "THINK: Got 403 ACTION:Forbidden response\nACTION: http_get https://example.com",
+			wantThink: "Got 403 ACTION:Forbidden response",
+			wantTool:  "http_get",
+			wantArgs:  "https://example.com",
+		},
+		{
+			name:      "single-line action without think prefix",
+			input:     "ACTION: done No more targets",
+			wantThink: "",
+			wantTool:  "done",
+			wantArgs:  "No more targets",
+		},
 	}
 
 	for _, tt := range tests {
