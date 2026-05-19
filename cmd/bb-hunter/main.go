@@ -319,6 +319,7 @@ func main() {
 	ratePerSecond := flag.Float64("rate", 10, "requests per second to target")
 	dryRun := flag.Bool("dry-run", false, "parse scope and validate config without scanning")
 	checkLLM := flag.Bool("check-llm", false, "check LLM provider availability and exit")
+	checkFfuf := flag.Bool("check-ffuf", false, "verify ffuf binary is in PATH and exit")
 	agentMode := flag.Bool("agent", false, "enable autonomous LLM agent mode (AI drives the tools)")
 	agentMaxSteps := flag.Int("agent-steps", 0, "max steps for agent mode (0 = unlimited; first Ctrl+C requests a graceful stop, second hard-kills)")
 	agentDelayMs := flag.Int("agent-delay", 3000, "delay between LLM calls in ms (100 = 10 req/sec)")
@@ -740,6 +741,16 @@ func main() {
 			hitlBot.WaitForAll(ctx)
 			hitlBot.Stop()
 		}
+		os.Exit(0)
+	}
+
+	// --check-ffuf: verify ffuf binary is in PATH and exit
+	if *checkFfuf {
+		if err := agent.CheckFfufBinary(ctx); err != nil {
+			fmt.Fprintf(os.Stderr, "ERROR: ffuf binary check failed: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("OK: ffuf is available")
 		os.Exit(0)
 	}
 
