@@ -198,14 +198,35 @@ func (te *ToolExecutor) browserClick(ctx context.Context, selector string) strin
 	if strings.HasPrefix(selector, "e") && len(selector) > 1 && selector[1] >= '0' && selector[1] <= '9' {
 		selector = "@" + selector
 	}
+
+	urlBefore := te.captureCurrentURL(ctx)
+
 	out, err := te.runBrowserCmd(ctx, "click", selector)
 	if err != nil {
 		return fmt.Sprintf("ERROR: %v", err)
 	}
-	if out == "" {
-		return fmt.Sprintf("OK: clicked %s", selector)
+
+	urlAfter := te.captureCurrentURL(ctx)
+
+	clickOut := out
+	if clickOut == "" {
+		clickOut = fmt.Sprintf("OK: clicked %s", selector)
 	}
-	return truncate(out, 80000)
+	navSuffix := describeNavigation(classifyNavigation(urlBefore, urlAfter), urlBefore, urlAfter)
+	return truncate(composeClickObservation(clickOut, navSuffix), 80000)
+}
+
+// captureCurrentURL returns window.location.href via the browser_eval
+// machinery, or "" when the underlying tool errored (no browser open,
+// page not loaded, eval rejected, etc.). The empty-string case is handled
+// by classifyNavigation as navUnknown so the click observation is not
+// polluted with a misleading WARNING.
+func (te *ToolExecutor) captureCurrentURL(ctx context.Context) string {
+	out, err := te.runBrowserCmd(ctx, "eval", "window.location.href")
+	if err != nil {
+		return ""
+	}
+	return normaliseEvalURL(out)
 }
 
 func (te *ToolExecutor) browserType(ctx context.Context, args string) string {
