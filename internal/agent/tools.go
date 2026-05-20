@@ -39,6 +39,7 @@ func AllTools() []ToolDef {
 		{Name: "run_ffuf", Description: "Fuzz a URL with a wordlist (path discovery). URL must contain FUZZ.", Args: "<url> <wordlist_path> [filter_status_codes]"},
 		{Name: "build_wordlist", Description: "Write a wordlist file from inline newline-separated paths.", Args: "<output_path>\\n<path1>\\n<path2>..."},
 		{Name: "run_cmd", Description: "Run an arbitrary shell command (recon only, no destructive ops)", Args: "<command>"},
+		{Name: "recall", Description: "Retrieve stored data from session memory", Args: "endpoints | http <url> | js <url> | search <keyword>"},
 		{Name: "report_finding", Description: "Report a discovered vulnerability", Args: "<json: {vuln_class, severity, url, description, evidence}>"},
 		{Name: "done", Description: "Finish the agent session and summarize results", Args: "[summary]"},
 	}
@@ -65,6 +66,7 @@ type ToolExecutor struct {
 	proxyAddr       string
 	httpClient      *http.Client
 	findings        []Finding
+	store           *SessionStore // session store for recall tool
 }
 
 // Finding is a vulnerability discovered by the agent.
@@ -133,6 +135,11 @@ func (te *ToolExecutor) Execute(ctx context.Context, tool, args string) string {
 		return te.buildWordlistTool(args)
 	case "run_cmd":
 		return te.runCmd(ctx, args)
+	case "recall":
+		if te.store != nil {
+			return te.store.Recall(args)
+		}
+		return "ERROR: session store not available"
 	case "report_finding":
 		return te.reportFinding(args)
 	case "done":

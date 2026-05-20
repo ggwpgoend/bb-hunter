@@ -49,6 +49,11 @@ type Agent struct {
 	// once in New() and is stable across the whole run.
 	mem *workingMemory
 
+	// store is the session data store. Full tool outputs are recorded here
+	// and only compact summaries go into the LLM history. The agent can
+	// retrieve full data via the "recall" tool.
+	store *SessionStore
+
 	// stopRequested is set to 1 by RequestStop() to signal the run loop to
 	// wind down gracefully. The loop runs at most StopGraceSteps more turns
 	// after the flag flips, then exits regardless.
@@ -67,13 +72,17 @@ func New(cfg Config) *Agent {
 	if cfg.LLMDelayMs <= 0 {
 		cfg.LLMDelayMs = 3000
 	}
+	store := NewSessionStore()
+	executor := NewToolExecutor(cfg.AgentBrowserBin, cfg.ScreenshotDir, cfg.ProxyAddr)
+	executor.store = store
 	a := &Agent{
 		cfg:      cfg,
-		executor: NewToolExecutor(cfg.AgentBrowserBin, cfg.ScreenshotDir, cfg.ProxyAddr),
+		executor: executor,
 		display:  NewDisplay(),
 		log:      cfg.Logger,
 		reflect:  newReflectState(),
 		mem:      newWorkingMemory(0),
+		store:    store,
 	}
 	a.log.Debug("agent: session initialised", "session_id", a.mem.SessionID())
 	return a
@@ -340,10 +349,11 @@ func (a *Agent) Run(ctx context.Context) ([]Finding, error) {
 			}
 		}
 
-		// Add observation to history
+		// Record full observation in session store; use compact summary in history.
+		compact := a.store.Record(step, tool, args, observation)
 		a.history = append(a.history, llm.Message{
 			Role:    llm.RoleUser,
-			Content: fmt.Sprintf("OBSERVATION: %s", observation),
+			Content: fmt.Sprintf("OBSERVATION: %s", compact),
 		})
 
 		// Reflection: record this turn, inject a SYSTEM NOTE if a loop/error
@@ -373,13 +383,15 @@ endLoop:
 }
 
 // buildLLMMessages returns the message slice for one LLM call. It inserts
-// the working-memory block (if any hypotheses exist) right after the system
-// prompt and before the running history so it sits high in the model's
-// attention window AND survives any future trimHistory pass — the block is
-// re-built on every call and never stored in a.history.
+// the session-memory block (hypotheses + attack surface index) right after
+// the system prompt and before the running history so it sits high in the
+// model's attention window AND survives any future trimHistory pass — the
+// block is re-built on every call and never stored in a.history.
 func (a *Agent) buildLLMMessages() []llm.Message {
-	block := ""
-	if a.mem != nil {
+	var block string
+	if a.store != nil && a.mem != nil {
+		block = a.store.MemoryBlock(a.mem.All())
+	} else if a.mem != nil {
 		block = a.mem.Block()
 	}
 	if block == "" {
@@ -501,8 +513,10 @@ func splitToolArgs(action string) (string, string) {
 }
 
 // trimHistory keeps conversation manageable by removing old messages.
+// With the session store holding full data, we can be more aggressive:
+// 14 messages total (system + initial + trim marker + last 11 exchanges).
 func (a *Agent) trimHistory() {
-	maxMessages := 30
+	maxMessages := 14
 	if len(a.history) <= maxMessages {
 		return
 	}
@@ -513,7 +527,7 @@ func (a *Agent) trimHistory() {
 	newHistory = append(newHistory, a.history[1]) // initial
 	newHistory = append(newHistory, llm.Message{
 		Role:    llm.RoleUser,
-		Content: "[Earlier conversation trimmed for context. Continue your investigation based on what you've learned so far.]",
+		Content: "[Earlier conversation trimmed. All data is preserved in session memory — use `recall` to retrieve full HTTP responses, endpoints, JS sources, or search by keyword.]",
 	})
 	newHistory = append(newHistory, a.history[len(a.history)-keepFromEnd:]...)
 	a.history = newHistory
