@@ -205,13 +205,21 @@ func buildStageClient(stage string, opts stageBuildOpts, logger *slog.Logger) *l
 	// Free premium tier — Cerebras (fastest free reasoning at ~200ms, Qwen-3-235B),
 	// Groq (LPU inference at ~250-400ms), Gemini Flash (1M context, 500 RPD).
 	// These cover the role CloseRouter used to fill in dev.
+	//
+	// Per-provider soft timeouts ensure slow responses fail fast so the
+	// round-robin can try the next provider. MaxCooldown caps exponential
+	// backoff for providers with per-minute rate limits.
 	if opts.CerebrasKey != "" && cfg.Cerebras != "" {
 		providers = append(providers, llm.NewOpenAICompatProvider(
-			"cerebras", "https://api.cerebras.ai/v1", opts.CerebrasKey, cfg.Cerebras))
+			"cerebras", "https://api.cerebras.ai/v1", opts.CerebrasKey, cfg.Cerebras).
+			WithMaxCooldown(65).
+			WithSoftTimeout(10*time.Second))
 	}
 	if opts.GroqKey != "" && cfg.Groq != "" {
 		providers = append(providers, llm.NewOpenAICompatProvider(
-			"groq", "https://api.groq.com/openai/v1", opts.GroqKey, cfg.Groq))
+			"groq", "https://api.groq.com/openai/v1", opts.GroqKey, cfg.Groq).
+			WithMaxCooldown(65).
+			WithSoftTimeout(10*time.Second))
 	}
 	if opts.GeminiKey != "" && cfg.Gemini != "" {
 		providers = append(providers, llm.NewGeminiProvider(opts.GeminiKey, cfg.Gemini))
@@ -219,11 +227,13 @@ func buildStageClient(stage string, opts stageBuildOpts, logger *slog.Logger) *l
 
 	if opts.SambaKey != "" {
 		providers = append(providers, llm.NewOpenAICompatProvider(
-			"samba", "https://api.sambanova.ai/v1", opts.SambaKey, cfg.Samba))
+			"samba", "https://api.sambanova.ai/v1", opts.SambaKey, cfg.Samba).
+			WithSoftTimeout(45*time.Second))
 	}
 	if opts.FreeTheAIKey != "" {
 		providers = append(providers, llm.NewOpenAICompatProvider(
-			"freetheai", "https://api.freetheai.xyz/v1", opts.FreeTheAIKey, cfg.FreeTheAI))
+			"freetheai", "https://api.freetheai.xyz/v1", opts.FreeTheAIKey, cfg.FreeTheAI).
+			WithSoftTimeout(30*time.Second))
 	}
 
 	// Speed-critical stages use Fast Bundle key, heavy stages use Unlimited key
@@ -236,18 +246,21 @@ func buildStageClient(stage string, opts stageBuildOpts, logger *slog.Logger) *l
 	}
 	if ck != "" {
 		providers = append(providers, llm.NewOpenAICompatProvider(
-			"canopy", "https://inference.canopywave.io/v1", ck, cfg.Canopy))
+			"canopy", "https://inference.canopywave.io/v1", ck, cfg.Canopy).
+			WithSoftTimeout(60*time.Second))
 	}
 
 	// LLM7 and UncloseAI are last-resort free fallbacks; they're slower and
 	// less reliable, but help when everything else is exhausted.
 	if opts.LLM7Key != "" && cfg.LLM7 != "" {
 		providers = append(providers, llm.NewOpenAICompatProvider(
-			"llm7", "https://api.llm7.io/v1", opts.LLM7Key, cfg.LLM7))
+			"llm7", "https://api.llm7.io/v1", opts.LLM7Key, cfg.LLM7).
+			WithSoftTimeout(30*time.Second))
 	}
 	if opts.UncloseAIKey != "" && cfg.UncloseAI != "" {
 		providers = append(providers, llm.NewOpenAICompatProvider(
-			"uncloseai", "https://hermes.ai.unturf.com/v1", opts.UncloseAIKey, cfg.UncloseAI))
+			"uncloseai", "https://hermes.ai.unturf.com/v1", opts.UncloseAIKey, cfg.UncloseAI).
+			WithSoftTimeout(45*time.Second))
 	}
 
 	if len(providers) == 0 {

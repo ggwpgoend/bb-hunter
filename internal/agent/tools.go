@@ -37,6 +37,7 @@ func AllTools() []ToolDef {
 		{Name: "run_httpx", Description: "Probe hosts for live HTTP services", Args: "<host1,host2,...>"},
 		{Name: "run_katana", Description: "Crawl a URL and discover endpoints", Args: "<url> [depth]"},
 		{Name: "run_cmd", Description: "Run an arbitrary shell command (recon only, no destructive ops)", Args: "<command>"},
+		{Name: "recall", Description: "Retrieve stored data from session memory", Args: "endpoints | http <url> | js <url> | search <keyword>"},
 		{Name: "report_finding", Description: "Report a discovered vulnerability", Args: "<json: {vuln_class, severity, url, description, evidence}>"},
 		{Name: "done", Description: "Finish the agent session and summarize results", Args: "[summary]"},
 	}
@@ -63,6 +64,7 @@ type ToolExecutor struct {
 	proxyAddr       string
 	httpClient      *http.Client
 	findings        []Finding
+	store           *SessionStore // session store for recall tool
 }
 
 // Finding is a vulnerability discovered by the agent.
@@ -127,6 +129,11 @@ func (te *ToolExecutor) Execute(ctx context.Context, tool, args string) string {
 		return te.runKatana(ctx, args)
 	case "run_cmd":
 		return te.runCmd(ctx, args)
+	case "recall":
+		if te.store != nil {
+			return te.store.Recall(args)
+		}
+		return "ERROR: session store not available"
 	case "report_finding":
 		return te.reportFinding(args)
 	case "done":

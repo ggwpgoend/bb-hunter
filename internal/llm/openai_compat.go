@@ -24,6 +24,15 @@ type OpenAICompatProvider struct {
 	rateLimited bool
 	retryAfter  time.Time
 	cooldownSec int // adaptive cooldown duration (grows on repeated rate limits)
+
+	// maxCooldownSec caps exponential backoff. 0 → default 300s.
+	// Fast providers with per-minute limits (cerebras, groq) should use 65.
+	maxCooldownSec int
+
+	// softTimeout is a per-provider request timeout. When >0 a per-request
+	// context.WithTimeout is applied so a slow provider fails fast and the
+	// round-robin moves on. 0 → use httpClient.Timeout (120s).
+	softTimeout time.Duration
 }
 
 // NewOpenAICompatProvider creates a provider for any OpenAI-compatible endpoint.
@@ -37,6 +46,20 @@ func NewOpenAICompatProvider(name, baseURL, apiKey, model string) *OpenAICompatP
 	}
 }
 
+// WithMaxCooldown sets the maximum backoff cap in seconds. Providers with
+// per-minute rate limits (cerebras, groq) should use ~65s; the default is 300s.
+func (o *OpenAICompatProvider) WithMaxCooldown(sec int) *OpenAICompatProvider {
+	o.maxCooldownSec = sec
+	return o
+}
+
+// WithSoftTimeout sets a per-request timeout. Requests exceeding this are
+// cancelled so the round-robin can try the next provider quickly.
+func (o *OpenAICompatProvider) WithSoftTimeout(d time.Duration) *OpenAICompatProvider {
+	o.softTimeout = d
+	return o
+}
+
 func (o *OpenAICompatProvider) Name() string  { return o.name }
 func (o *OpenAICompatProvider) Model() string { return o.model }
 
@@ -46,8 +69,10 @@ func (o *OpenAICompatProvider) Available() bool {
 	if o.rateLimited && time.Now().Before(o.retryAfter) {
 		return false
 	}
+	// Clear the rate-limit flag but preserve cooldownSec so the next 429
+	// continues the exponential backoff. cooldownSec is only reset on a
+	// successful Complete() call.
 	o.rateLimited = false
-	o.cooldownSec = 0
 	return true
 }
 
@@ -88,6 +113,13 @@ type oaiResponse struct {
 
 func (o *OpenAICompatProvider) Complete(ctx context.Context, req *Request) (*Response, error) {
 	start := time.Now()
+
+	// Apply per-provider soft timeout so slow providers fail fast.
+	if o.softTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, o.softTimeout)
+		defer cancel()
+	}
 
 	// Convert to OpenAI format
 	oaiReq := oaiRequest{
@@ -137,10 +169,17 @@ func (o *OpenAICompatProvider) Complete(ctx context.Context, req *Request) (*Res
 
 	if httpResp.StatusCode == 429 {
 		o.mu.Lock()
+		maxCD := o.maxCooldownSec
+		if maxCD <= 0 {
+			maxCD = 300
+		}
 		if o.cooldownSec < 30 {
 			o.cooldownSec = 30
-		} else if o.cooldownSec < 300 {
+		} else {
 			o.cooldownSec *= 2
+		}
+		if o.cooldownSec > maxCD {
+			o.cooldownSec = maxCD
 		}
 		o.rateLimited = true
 		o.retryAfter = time.Now().Add(time.Duration(o.cooldownSec) * time.Second)
@@ -164,6 +203,12 @@ func (o *OpenAICompatProvider) Complete(ctx context.Context, req *Request) (*Res
 	if len(oaiResp.Choices) == 0 {
 		return nil, fmt.Errorf("%s: empty response", o.name)
 	}
+
+	// Successful completion: reset adaptive cooldown so future 429s
+	// start from the minimum backoff again.
+	o.mu.Lock()
+	o.cooldownSec = 0
+	o.mu.Unlock()
 
 	return &Response{
 		Content:      oaiResp.Choices[0].Message.Content,
