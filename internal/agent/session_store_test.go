@@ -55,6 +55,41 @@ func TestSessionStore_RecordHTTPRaw(t *testing.T) {
 	}
 }
 
+func TestSessionStore_HTTPTestLedgerPreservesRepeatedPosts(t *testing.T) {
+	s := NewSessionStore()
+
+	s.Record(1, "http_raw", `POST https://example.com/stock "Content-Type: application/xml" "body:<stockCheck><productId>1</productId><storeId>1</storeId></stockCheck>"`,
+		"HTTP 200 200 OK\nContent-Type: text/plain\n\n880")
+	s.Record(2, "http_raw", `POST https://example.com/stock "Content-Type: application/xml" "body:<?xml version=\"1.0\"?><!DOCTYPE stockCheck [<!ENTITY xxe SYSTEM \"file:///etc/passwd\">]><stockCheck><productId>1</productId><storeId>&xxe;</storeId></stockCheck>"`,
+		"HTTP 200 200 OK\nContent-Type: text/plain\n\nEntities are not allowed for security reasons")
+
+	tests := s.Recall("tests xxe")
+	if !strings.Contains(tests, "http-002") || !strings.Contains(tests, "probe_xxe") {
+		t.Fatalf("expected xxe test ledger entry, got: %s", tests)
+	}
+	negative := s.Recall("negative")
+	if !strings.Contains(negative, "xxe @ https://example.com/stock") {
+		t.Fatalf("expected negative XXE evidence, got: %s", negative)
+	}
+	mem := s.MemoryBlock(nil)
+	if !strings.Contains(mem, "Negative / do-not-repeat") || !strings.Contains(mem, "Recent HTTP tests") {
+		t.Fatalf("memory block should include investigation state, got: %s", mem)
+	}
+}
+
+func TestSessionStore_HTTPRequestStructuredTool(t *testing.T) {
+	s := NewSessionStore()
+	args := `{"method":"POST","url":"https://example.com/api","headers":{"Content-Type":"application/json"},"body":"{\"name\":\"test\"}"}`
+	compact := s.Record(3, "http_request", args, "HTTP 201 201 Created\nContent-Type: application/json\n\n{\"ok\":true}")
+	if !strings.Contains(compact, `BodyPreview: "{\"ok\":true}"`) {
+		t.Fatalf("compact summary should include small JSON body preview, got: %s", compact)
+	}
+	last := s.Recall("last_response")
+	if !strings.Contains(last, "POST https://example.com/api -> 201") {
+		t.Fatalf("last response recall missing structured request, got: %s", last)
+	}
+}
+
 func TestSessionStore_RecordKatana(t *testing.T) {
 	s := NewSessionStore()
 

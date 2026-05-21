@@ -33,6 +33,7 @@ func AllTools() []ToolDef {
 		{Name: "browser_click", Description: "Click an element by CSS selector", Args: "<css_selector>"},
 		{Name: "browser_type", Description: "Type text into an input field", Args: "<css_selector> <text>"},
 		{Name: "http_get", Description: "Send HTTP GET request and return response headers + body (truncated)", Args: "<url>"},
+		{Name: "http_request", Description: "Send structured HTTP request. Prefer this over http_raw for POST/PUT/custom headers to avoid quoting mistakes.", Args: `{"method":"POST","url":"https://...","headers":{"Content-Type":"application/json"},"body":"..."}`},
 		{Name: "http_raw", Description: "Send raw HTTP request with custom method/headers/body. Wrap header values and bodies that contain spaces in matching \" or ' quotes. Inside a \"...\" group, escape inner double quotes as \\\", or use '...' as the outer pair.", Args: "<method> <url> [\"Header-Name: value\" ...] [\"body: payload\"]"},
 		{Name: "run_nuclei", Description: "Run nuclei scanner on a URL with optional template filter", Args: "<url> [template_filter]"},
 		{Name: "run_subfinder", Description: "Enumerate subdomains for a domain", Args: "<domain>"},
@@ -41,7 +42,7 @@ func AllTools() []ToolDef {
 		{Name: "run_ffuf", Description: "Fuzz a URL with a wordlist (path discovery). URL must contain FUZZ.", Args: "<url> <wordlist_path> [filter_status_codes]"},
 		{Name: "build_wordlist", Description: "Write a wordlist file from inline newline-separated paths.", Args: "<output_path>\\n<path1>\\n<path2>..."},
 		{Name: "run_cmd", Description: "Run an arbitrary shell command (recon only, no destructive ops)", Args: "<command>"},
-		{Name: "recall", Description: "Retrieve stored data from session memory", Args: "endpoints | http <url> | js <url> | search <keyword>"},
+		{Name: "recall", Description: "Retrieve stored data from session memory", Args: "endpoints | endpoint <filter> | http <url> | last_response | tests [filter] | negative | js <url> | search <keyword>"},
 		{Name: "report_finding", Description: "Report a discovered vulnerability", Args: "<json: {vuln_class, severity, url, description, evidence}>"},
 		{Name: "done", Description: "Finish the agent session and summarize results", Args: "[summary]"},
 	}
@@ -143,6 +144,8 @@ func (te *ToolExecutor) Execute(ctx context.Context, tool, args string) string {
 		return te.httpGet(ctx, args)
 	case "http_raw":
 		return te.httpRaw(ctx, args)
+	case "http_request":
+		return te.httpRequest(ctx, args)
 	case "run_nuclei":
 		return te.runNuclei(ctx, args)
 	case "run_subfinder":
@@ -381,37 +384,7 @@ func (te *ToolExecutor) httpRaw(ctx context.Context, args string) string {
 
 	method := strings.ToUpper(parts[0])
 	url := parts[1]
-	var bodyStr string
-	headers := make(map[string]string)
-
-	for _, p := range parts[2:] {
-		// Strip surrounding [] brackets that LLMs often wrap around args.
-		p = stripBrackets(p)
-		if p == "" {
-			continue
-		}
-
-		switch {
-		case strings.HasPrefix(p, "body:"):
-			bodyStr = strings.TrimSpace(strings.TrimPrefix(p, "body:"))
-		case strings.HasPrefix(p, "body="):
-			bodyStr = strings.TrimSpace(strings.TrimPrefix(p, "body="))
-		case looksLikeJSONBody(p):
-			// Auto-detect JSON body without "body:" prefix.
-			bodyStr = p
-		default:
-			if idx := strings.Index(p, ":"); idx > 0 {
-				name := strings.TrimSpace(p[:idx])
-				value := strings.TrimSpace(p[idx+1:])
-				if name != "" && isValidHeaderName(name) {
-					headers[name] = value
-				} else if name != "" {
-					// Likely a malformed body; treat as body.
-					bodyStr = p
-				}
-			}
-		}
-	}
+	headers, bodyStr := parseHTTPRawParts(parts[2:])
 
 	var bodyReader io.Reader
 	if bodyStr != "" {
@@ -424,6 +397,46 @@ func (te *ToolExecutor) httpRaw(ctx context.Context, args string) string {
 	}
 	for k, v := range headers {
 		req.Header.Set(k, v)
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) BB-Hunter-Agent/1.0")
+
+	resp, err := te.httpClient.Do(req)
+	if err != nil {
+		return fmt.Sprintf("ERROR: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 100000))
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("HTTP %d %s\n", resp.StatusCode, resp.Status))
+	for k, v := range resp.Header {
+		sb.WriteString(fmt.Sprintf("%s: %s\n", k, strings.Join(v, ", ")))
+	}
+	sb.WriteString("\n")
+	sb.WriteString(string(body))
+
+	return truncate(filterHTTPObservation(sb.String()), 80000)
+}
+
+func (te *ToolExecutor) httpRequest(ctx context.Context, args string) string {
+	spec, err := parseHTTPRequestSpec(args)
+	if err != nil {
+		return fmt.Sprintf(`ERROR: invalid http_request JSON: %v. Expected {"method":"POST","url":"https://...","headers":{"Content-Type":"application/json"},"body":"..."}`, err)
+	}
+
+	var bodyReader io.Reader
+	if spec.Body != "" {
+		bodyReader = strings.NewReader(spec.Body)
+	}
+	req, err := http.NewRequestWithContext(ctx, spec.Method, spec.URL, bodyReader)
+	if err != nil {
+		return fmt.Sprintf("ERROR: %v", err)
+	}
+	for k, v := range spec.Headers {
+		if isValidHeaderName(k) {
+			req.Header.Set(k, v)
+		}
 	}
 	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) BB-Hunter-Agent/1.0")
 

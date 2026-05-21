@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 )
@@ -88,6 +89,13 @@ type Client struct {
 	killSwitch bool
 	nextIdx    int // round-robin index for provider rotation
 	mu         sync.Mutex
+	health     map[string]providerHealth
+}
+
+type providerHealth struct {
+	Failures        int
+	QuarantineUntil time.Time
+	LastSuccess     time.Time
 }
 
 // NewClient creates a new multi-provider LLM client with round-robin rotation.
@@ -95,7 +103,7 @@ func NewClient(providers ...Provider) (*Client, error) {
 	if len(providers) == 0 {
 		return nil, ErrNoProviders
 	}
-	return &Client{providers: providers}, nil
+	return &Client{providers: providers, health: make(map[string]providerHealth)}, nil
 }
 
 // Complete uses round-robin to distribute calls across providers.
@@ -107,7 +115,11 @@ func (c *Client) Complete(ctx context.Context, req *Request) (*Response, error) 
 
 	c.mu.Lock()
 	startIdx := c.nextIdx
-	c.nextIdx = (c.nextIdx + 1) % len(c.providers)
+	if sticky := c.stickyProviderIndexLocked(); sticky >= 0 {
+		startIdx = sticky
+	} else {
+		c.nextIdx = (c.nextIdx + 1) % len(c.providers)
+	}
 	c.mu.Unlock()
 
 	var lastErr error
@@ -115,9 +127,14 @@ func (c *Client) Complete(ctx context.Context, req *Request) (*Response, error) 
 	for i := 0; i < n; i++ {
 		idx := (startIdx + i) % n
 		p := c.providers[idx]
+		key := providerKey(p)
 
 		if !p.Available() {
 			slog.Info("llm: provider skipped", "provider", p.Name(), "model", p.Model(), "reason", "not_available")
+			continue
+		}
+		if until, ok := c.quarantinedUntil(key); ok {
+			slog.Info("llm: provider skipped", "provider", p.Name(), "model", p.Model(), "reason", "health_quarantine", "retry_after", until)
 			continue
 		}
 
@@ -127,6 +144,7 @@ func (c *Client) Complete(ctx context.Context, req *Request) (*Response, error) 
 		latency := time.Since(start)
 		if err != nil {
 			slog.Warn("llm: provider failed", "provider", p.Name(), "model", p.Model(), "attempt", i+1, "latency", latency, "error", err)
+			c.recordProviderFailure(key, err)
 			lastErr = fmt.Errorf("%s: %w", p.Name(), err)
 			continue
 		}
@@ -134,6 +152,7 @@ func (c *Client) Complete(ctx context.Context, req *Request) (*Response, error) 
 			resp.Latency = latency
 		}
 		slog.Info("llm: provider succeeded", "provider", p.Name(), "model", p.Model(), "attempt", i+1, "latency", latency)
+		c.recordProviderSuccess(key)
 
 		if req.SentinelUUID != "" {
 			resp.SentinelLeaked = containsSentinel(resp.Content, req.SentinelUUID)
@@ -146,6 +165,76 @@ func (c *Client) Complete(ctx context.Context, req *Request) (*Response, error) 
 		return nil, fmt.Errorf("%w: last error: %v", ErrAllFailed, lastErr)
 	}
 	return nil, ErrAllFailed
+}
+
+func (c *Client) stickyProviderIndexLocked() int {
+	var bestIdx = -1
+	var bestSuccess time.Time
+	now := time.Now()
+	for i, p := range c.providers {
+		key := providerKey(p)
+		h := c.health[key]
+		if h.LastSuccess.IsZero() || now.Before(h.QuarantineUntil) {
+			continue
+		}
+		if bestIdx < 0 || h.LastSuccess.After(bestSuccess) {
+			bestIdx = i
+			bestSuccess = h.LastSuccess
+		}
+	}
+	return bestIdx
+}
+
+func (c *Client) quarantinedUntil(key string) (time.Time, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	h := c.health[key]
+	if h.QuarantineUntil.IsZero() || time.Now().After(h.QuarantineUntil) {
+		return time.Time{}, false
+	}
+	return h.QuarantineUntil, true
+}
+
+func (c *Client) recordProviderSuccess(key string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	h := c.health[key]
+	h.Failures = 0
+	h.QuarantineUntil = time.Time{}
+	h.LastSuccess = time.Now()
+	c.health[key] = h
+}
+
+func (c *Client) recordProviderFailure(key string, err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	h := c.health[key]
+	h.Failures++
+	if duration := providerQuarantineDuration(err, h.Failures); duration > 0 {
+		h.QuarantineUntil = time.Now().Add(duration)
+	}
+	c.health[key] = h
+}
+
+func providerQuarantineDuration(err error, failures int) time.Duration {
+	text := strings.ToLower(err.Error())
+	switch {
+	case errors.Is(err, ErrRateLimited), strings.Contains(text, "rate limited"), strings.Contains(text, "quota"):
+		return 2 * time.Minute
+	case strings.Contains(text, "403"), strings.Contains(text, "forbidden"), strings.Contains(text, "cloudflare"):
+		return 5 * time.Minute
+	case strings.Contains(text, "context deadline exceeded"), strings.Contains(text, "timeout"):
+		if failures >= 2 {
+			return time.Minute
+		}
+	case failures >= 3:
+		return time.Minute
+	}
+	return 0
+}
+
+func providerKey(p Provider) string {
+	return p.Name() + "|" + p.Model()
 }
 
 // HealthResult contains the result of a provider health check.

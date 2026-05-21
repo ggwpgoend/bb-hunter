@@ -73,9 +73,9 @@ func TestSplitArgsQuoteAware(t *testing.T) {
 
 func TestSplitFirstField(t *testing.T) {
 	cases := []struct {
-		in           string
-		first, rest  string
-		ok           bool
+		in          string
+		first, rest string
+		ok          bool
 	}{
 		{"", "", "", false},
 		{"only", "only", "", true},
@@ -200,6 +200,42 @@ func TestHttpRawHandlesHeaderAndBodyWithSpaces(t *testing.T) {
 	}
 }
 
+func TestHttpRequestStructuredJSON(t *testing.T) {
+	var (
+		gotMethod      string
+		gotContentType string
+		gotBody        string
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotContentType = r.Header.Get("Content-Type")
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.WriteHeader(200)
+		_, _ = io.WriteString(w, "ok")
+	}))
+	defer srv.Close()
+
+	te := NewToolExecutor("", "", "")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	args := `{"method":"POST","url":"` + srv.URL + `","headers":{"Content-Type":"application/xml"},"body":"<?xml version=\"1.0\"?><stockCheck><productId>1</productId></stockCheck>"}`
+	got := te.httpRequest(ctx, args)
+	if !strings.Contains(got, "HTTP 200") {
+		t.Fatalf("expected HTTP 200, got: %s", got)
+	}
+	if gotMethod != "POST" {
+		t.Fatalf("method = %q, want POST", gotMethod)
+	}
+	if gotContentType != "application/xml" {
+		t.Fatalf("content type = %q", gotContentType)
+	}
+	if !strings.Contains(gotBody, "<stockCheck>") {
+		t.Fatalf("body did not reach server: %q", gotBody)
+	}
+}
+
 // TestHttpRawAcceptsLegacyUnquotedSyntax ensures we didn't regress the
 // pre-existing (no-spaces) usage.
 func TestHttpRawAcceptsLegacyUnquotedSyntax(t *testing.T) {
@@ -224,7 +260,9 @@ func TestHttpRawAcceptsLegacyUnquotedSyntax(t *testing.T) {
 }
 
 // TestRunCmdStripsOuterQuotes reproduces the failure mode where the LLM wrote
-//   ACTION: run_cmd "curl -X POST ..."
+//
+//	ACTION: run_cmd "curl -X POST ..."
+//
 // and sh saw a leading " and reported "Syntax error: Unterminated quoted string".
 func TestRunCmdStripsOuterQuotes(t *testing.T) {
 	te := NewToolExecutor("", "", "")

@@ -161,7 +161,7 @@ These lines are your durable memory. You MUST emit them when you have a working 
 You have HTTP, Browser, Katana, Nuclei, Cmd tools. Use them to GATHER data; do the reasoning yourself.
 1. Use run_katana / run_subfinder to discover endpoints. Read their output carefully — it usually contains the real attack surface.
 2. When testing endpoints, prefer the MOST PROMISING one first based on recon evidence (parameters in URL, suspicious paths like /admin /api/v1/users/<id>, error messages, redirected responses). Do not parallel-test guessed-at endpoints — confirm they exist first.
-3. Prefer http_get / http_raw for endpoint probing. Use browser_* tools ONLY when you need JavaScript execution, client-side routing, or DOM-based behaviour. Browser tools are slow and lossy.
+3. Prefer http_get / http_request for endpoint probing. Use http_request JSON for POST/PUT/custom headers/bodies; it avoids quoting bugs and stores exact request history. Use browser_* tools ONLY when you need JavaScript execution, client-side routing, or DOM-based behaviour. Browser tools are slow and lossy.
 4. 4xx/5xx responses are signal, not noise. Read the headers (Location, WWW-Authenticate, Set-Cookie, X-CSRF-Token, Content-Type) and the first chunk of the body — they tell you what the server expects.
 5. If you need custom exploit logic or data processing, use run_cmd to execute python/node/bash. You have full freedom to write and run code.
 
@@ -188,7 +188,10 @@ ACTION: report_finding {"vuln_class": "xss", "severity": "high", "url": "...", "
 If your JSON is malformed, the system will extract your description anyway — but try to keep it valid.
 
 ## Anti-Loop Discipline
-If you see a "SYSTEM NOTE:" message in the conversation, the run loop has detected that you are stuck (repeating an action, oscillating between two tools, or producing repeated errors). When you see one, you MUST change at least one of: (a) the tool, (b) the target URL/endpoint, (c) the vuln class you are probing. Do NOT retry the same action with cosmetic changes (different casing, trailing slash, etc.) — that does not break the loop.`
+If you see a "SYSTEM NOTE:" message in the conversation, the run loop has detected that you are stuck (repeating an action, oscillating between two tools, semantic repeat of the same vuln probe, or producing repeated errors). When you see one, you MUST change at least one of: (a) the tool, (b) the target URL/endpoint, (c) the vuln class you are probing. Do NOT retry the same action with cosmetic changes (different casing, trailing slash, payload quote style, field order, or curl vs http_request) — that does not break the loop.
+
+## Evidence Discipline
+Treat [SESSION MEMORY] as authoritative. If it lists Negative evidence, do not repeat that vuln class/endpoint/primitive unless you have a new reason. Use recall negative, recall tests <endpoint-or-class>, and recall last_response before retesting something that looks familiar. A finding is reportable only with proof, not parser behaviour alone.`
 
 // Run starts the autonomous agent loop.
 func (a *Agent) Run(ctx context.Context) ([]Finding, error) {
