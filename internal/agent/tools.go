@@ -69,6 +69,8 @@ type ToolExecutor struct {
 	httpClient      *http.Client
 	findings        []Finding
 	store           *SessionStore // session store for recall tool
+
+	browserKills int // consecutive browser process kills
 }
 
 // Finding is a vulnerability discovered by the agent.
@@ -311,6 +313,10 @@ func (te *ToolExecutor) browserType(ctx context.Context, args string) string {
 }
 
 func (te *ToolExecutor) runBrowserCmd(ctx context.Context, args ...string) (string, error) {
+	// Apply a 45s timeout so a hung agent-browser doesn't block the step.
+	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
+	defer cancel()
+
 	cmd := exec.CommandContext(ctx, te.agentBrowserBin, args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -320,8 +326,17 @@ func (te *ToolExecutor) runBrowserCmd(ctx context.Context, args ...string) (stri
 		if errMsg == "" {
 			errMsg = err.Error()
 		}
+		// Track consecutive kills/crashes.
+		if strings.Contains(errMsg, "killed") || strings.Contains(errMsg, "signal") || ctx.Err() != nil {
+			te.browserKills++
+		}
+		if te.browserKills >= 3 {
+			return "", fmt.Errorf("agent-browser %s: %s (browser crashed %d times consecutively — consider using http_get/http_raw/run_cmd curl instead)",
+				args[0], strings.TrimSpace(errMsg), te.browserKills)
+		}
 		return "", fmt.Errorf("agent-browser %s: %s", args[0], strings.TrimSpace(errMsg))
 	}
+	te.browserKills = 0 // reset on success
 	return stdout.String(), nil
 }
 
@@ -361,7 +376,7 @@ func (te *ToolExecutor) httpGet(ctx context.Context, url string) string {
 func (te *ToolExecutor) httpRaw(ctx context.Context, args string) string {
 	parts := splitArgsQuoteAware(args)
 	if len(parts) < 2 {
-		return "ERROR: usage: http_raw <method> <url> [\"Header-Name: value\" ...] [\"body: payload\"]"
+		return `ERROR: usage: http_raw <method> <url> ["Header-Name: value" ...] ["body: payload"]`
 	}
 
 	method := strings.ToUpper(parts[0])
@@ -370,17 +385,29 @@ func (te *ToolExecutor) httpRaw(ctx context.Context, args string) string {
 	headers := make(map[string]string)
 
 	for _, p := range parts[2:] {
+		// Strip surrounding [] brackets that LLMs often wrap around args.
+		p = stripBrackets(p)
+		if p == "" {
+			continue
+		}
+
 		switch {
 		case strings.HasPrefix(p, "body:"):
-			bodyStr = strings.TrimPrefix(p, "body:")
+			bodyStr = strings.TrimSpace(strings.TrimPrefix(p, "body:"))
 		case strings.HasPrefix(p, "body="):
-			bodyStr = strings.TrimPrefix(p, "body=")
+			bodyStr = strings.TrimSpace(strings.TrimPrefix(p, "body="))
+		case looksLikeJSONBody(p):
+			// Auto-detect JSON body without "body:" prefix.
+			bodyStr = p
 		default:
 			if idx := strings.Index(p, ":"); idx > 0 {
 				name := strings.TrimSpace(p[:idx])
 				value := strings.TrimSpace(p[idx+1:])
-				if name != "" {
+				if name != "" && isValidHeaderName(name) {
 					headers[name] = value
+				} else if name != "" {
+					// Likely a malformed body; treat as body.
+					bodyStr = p
 				}
 			}
 		}
@@ -393,7 +420,7 @@ func (te *ToolExecutor) httpRaw(ctx context.Context, args string) string {
 
 	req, err := http.NewRequestWithContext(ctx, method, url, bodyReader)
 	if err != nil {
-		return fmt.Sprintf("ERROR: %v", err)
+		return fmt.Sprintf(`ERROR: %v. Expected format: http_raw POST <url> "Content-Type: application/json" "body: {\"key\":\"val\"}"`, err)
 	}
 	for k, v := range headers {
 		req.Header.Set(k, v)
@@ -647,6 +674,35 @@ func stripOuterQuotes(s string) string {
 //
 // both yield identical fields. Backslash-escaped quotes (\" / \') and
 // backslash-escaped backslashes (\\) inside a quoted run are unescaped.
+// stripBrackets removes surrounding [] from a string. LLMs frequently wrap
+// http_raw arguments in array-like brackets: ["Content-Type: ..."].
+func stripBrackets(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) >= 2 && s[0] == '[' && s[len(s)-1] == ']' {
+		s = strings.TrimSpace(s[1 : len(s)-1])
+	}
+	return s
+}
+
+// looksLikeJSONBody returns true if s looks like a JSON object or array
+// that the LLM passed as body without the "body:" prefix.
+func looksLikeJSONBody(s string) bool {
+	s = strings.TrimSpace(s)
+	return (strings.HasPrefix(s, "{") && strings.HasSuffix(s, "}")) ||
+		(strings.HasPrefix(s, "[") && strings.HasSuffix(s, "]"))
+}
+
+// isValidHeaderName checks that s is a plausible HTTP header name
+// (alphanumeric + hyphens, no brackets/braces/quotes).
+func isValidHeaderName(s string) bool {
+	for _, c := range s {
+		if !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_') {
+			return false
+		}
+	}
+	return len(s) > 0
+}
+
 func splitArgsQuoteAware(s string) []string {
 	var fields []string
 	i := 0
