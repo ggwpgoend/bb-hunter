@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -97,6 +99,24 @@ func NewToolExecutor(agentBrowserBin, screenshotDir, proxyAddr string) *ToolExec
 // Findings returns all reported findings.
 func (te *ToolExecutor) Findings() []Finding {
 	return te.findings
+}
+
+func (te *ToolExecutor) DropLastFinding() (Finding, bool) {
+	if len(te.findings) == 0 {
+		return Finding{}, false
+	}
+	f := te.findings[len(te.findings)-1]
+	te.findings = te.findings[:len(te.findings)-1]
+	return f, true
+}
+
+func (te *ToolExecutor) dropFinding(f Finding) {
+	for i := len(te.findings) - 1; i >= 0; i-- {
+		if te.findings[i] == f {
+			te.findings = append(te.findings[:i], te.findings[i+1:]...)
+			return
+		}
+	}
 }
 
 // Execute runs a tool and returns the observation string.
@@ -201,7 +221,37 @@ func (te *ToolExecutor) browserSnapshot(ctx context.Context) string {
 	return truncate(out, 80000)
 }
 
+func (te *ToolExecutor) VerifyXSSExecution(ctx context.Context, f Finding) VerificationResult {
+	payloads := xssEvidencePayloads(f)
+	if len(payloads) == 0 {
+		return VerificationResult{Verified: false, Reason: "no XSS payload found in evidence"}
+	}
 
+	openOut := te.browserOpen(ctx, f.URL)
+	if strings.HasPrefix(openOut, "ERROR:") {
+		return VerificationResult{Verified: false, Reason: openOut}
+	}
+	time.Sleep(1 * time.Second)
+
+	snapshot := te.browserSnapshot(ctx)
+	evalOut := te.browserEval(ctx, `JSON.stringify({href:window.location.href,title:document.title,text:document.body?document.body.innerText:"",html:document.documentElement?document.documentElement.outerHTML:""})`)
+	combined := strings.ToLower(snapshot + "\n" + evalOut)
+	if containsAlertMarker(combined) {
+		return VerificationResult{Verified: true, Reason: "browser alert/dialog marker observed"}
+	}
+	if strings.HasPrefix(snapshot, "ERROR:") && strings.HasPrefix(evalOut, "ERROR:") {
+		return VerificationResult{Verified: false, Reason: "browser opened URL but snapshot/eval failed"}
+	}
+	for _, payload := range payloads {
+		if payload != "" && strings.Contains(combined, strings.ToLower(payload)) {
+			return VerificationResult{Verified: true, Reason: "payload reflected in DOM snapshot (weak evidence)"}
+		}
+	}
+	if containsScriptMarker(combined) {
+		return VerificationResult{Verified: true, Reason: "script execution marker reflected in DOM (weak evidence)"}
+	}
+	return VerificationResult{Verified: false, Reason: "no alert/dialog marker or DOM reflection observed"}
+}
 
 func (te *ToolExecutor) browserClick(ctx context.Context, selector string) string {
 	selector = stripOuterQuotes(selector)
@@ -509,6 +559,56 @@ func (te *ToolExecutor) reportFinding(args string) string {
 
 	te.findings = append(te.findings, f)
 	return fmt.Sprintf("OK: finding #%d reported — %s %s at %s", len(te.findings), f.Severity, f.VulnClass, f.URL)
+}
+
+var xssPayloadRe = regexp.MustCompile(`(?i)(<script[^>]*>.*?</script>|<svg[^>]*onload[^>]*>|<img[^>]*onerror[^>]*>|javascript:[^\s"'<>]+|alert\s*\([^)]*\))`)
+
+func xssEvidencePayloads(f Finding) []string {
+	seen := make(map[string]bool)
+	var out []string
+	add := func(s string) {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			return
+		}
+		if decoded, err := url.QueryUnescape(s); err == nil {
+			s = decoded
+		}
+		if !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+
+	if u, err := url.Parse(f.URL); err == nil {
+		for _, vals := range u.Query() {
+			for _, v := range vals {
+				if strings.Contains(strings.ToLower(v), "alert") || strings.Contains(v, "<") || strings.Contains(strings.ToLower(v), "javascript:") {
+					add(v)
+				}
+			}
+		}
+	}
+	for _, src := range []string{f.Evidence, f.Description, f.URL} {
+		for _, match := range xssPayloadRe.FindAllString(src, -1) {
+			add(match)
+		}
+	}
+	return out
+}
+
+func containsAlertMarker(s string) bool {
+	markers := []string{"alert(", "dialog", "javascript dialog", "page.on('dialog", "window.alert", "__bbhunter_alert"}
+	for _, marker := range markers {
+		if strings.Contains(s, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsScriptMarker(s string) bool {
+	return strings.Contains(s, "<script") || strings.Contains(s, "onerror=") || strings.Contains(s, "onload=") || strings.Contains(s, "javascript:")
 }
 
 func truncate(s string, maxLen int) string {

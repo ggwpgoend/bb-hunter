@@ -19,6 +19,20 @@ const StopGraceSteps = 5
 // FindingCallback is called when the agent reports a finding (e.g. for HITL integration).
 type FindingCallback func(ctx context.Context, finding Finding) error
 
+type GateDecision struct {
+	Verdict string
+	Reason  string
+	Score   int
+}
+
+type VerificationResult struct {
+	Verified bool
+	Reason   string
+}
+
+type FindingGate func(ctx context.Context, finding Finding) (GateDecision, error)
+type BrowserVerifier func(ctx context.Context, finding Finding) (VerificationResult, error)
+
 // Config holds agent configuration.
 type Config struct {
 	Target          string
@@ -30,7 +44,9 @@ type Config struct {
 	MaxSteps        int // 0 = unlimited; agent runs until user requests stop or LLM emits 'done'
 	Logger          *slog.Logger
 	OnFinding       FindingCallback // called on each report_finding (HITL integration)
-	LLMDelayMs      int             // delay between LLM calls in milliseconds (0 = default 3000ms)
+	GateFinding     FindingGate
+	VerifyFinding   BrowserVerifier
+	LLMDelayMs      int // delay between LLM calls in milliseconds (0 = default 3000ms)
 }
 
 // Agent is an autonomous LLM-driven bug bounty hunter.
@@ -236,7 +252,7 @@ func (a *Agent) Run(ctx context.Context) ([]Finding, error) {
 			stopInjectedAtStep = step
 			a.display.Info(fmt.Sprintf("Stop requested — granting %d more steps to commit findings and exit gracefully.", StopGraceSteps))
 			a.history = append(a.history, llm.Message{
-				Role: llm.RoleUser,
+				Role:    llm.RoleUser,
 				Content: fmt.Sprintf("SYSTEM NOTE: the user requested a graceful stop. You have AT MOST %d more turns. If you have ANY evidence of a vulnerability (reflected payload, SQL error, open redirect, CSRF, prototype pollution, etc.), call report_finding IMMEDIATELY on the next action — one report per turn. When you have committed every finding you have evidence for, output `ACTION: done` to exit cleanly. Do NOT keep exploring new attack surface.", StopGraceSteps),
 			})
 		}
@@ -286,6 +302,10 @@ func (a *Agent) Run(ctx context.Context) ([]Finding, error) {
 		a.log.Debug("agent: LLM response",
 			"step", step,
 			"provider", resp.Provider,
+			"model", resp.Model,
+			"latency", resp.Latency,
+			"messages", len(messages),
+			"message_bytes", messagesByteLen(messages),
 			"tokens", resp.InputTokens+resp.OutputTokens,
 			"content_len", len(content),
 		)
@@ -335,13 +355,49 @@ func (a *Agent) Run(ctx context.Context) ([]Finding, error) {
 		// Display observation
 		a.display.Observation(observation)
 
-		// If it's a finding, display it prominently and call HITL callback
+		// If it's a finding, verify/gate it before display and HITL.
 		if tool == "report_finding" && strings.HasPrefix(observation, "OK:") {
 			findings := a.executor.Findings()
 			if len(findings) > 0 {
 				f := findings[len(findings)-1]
-				a.display.Finding(f.VulnClass, f.Severity, f.URL, f.Description)
-				if a.cfg.OnFinding != nil {
+				accepted := true
+				status := "accepted"
+				verifierRejected := false
+				if a.cfg.VerifyFinding != nil && findingNeedsBrowserVerification(f) {
+					vr, err := a.cfg.VerifyFinding(ctx, f)
+					if err != nil {
+						a.log.Warn("agent: browser verification failed", "error", err)
+					}
+					if err != nil || !vr.Verified {
+						accepted = false
+						verifierRejected = true
+						status = fmt.Sprintf("browser verification rejected finding: %s", vr.Reason)
+						a.executor.dropFinding(f)
+					} else if vr.Reason != "" {
+						status = "browser verification accepted finding: " + vr.Reason
+					}
+				}
+				if !verifierRejected && a.cfg.GateFinding != nil {
+					gd, err := a.cfg.GateFinding(ctx, f)
+					if err != nil {
+						a.log.Warn("agent: finding gate failed", "error", err)
+						gd = GateDecision{Verdict: "KILL", Reason: err.Error()}
+					}
+					if strings.EqualFold(gd.Verdict, "KILL") {
+						accepted = false
+						status = fmt.Sprintf("gate killed finding: %s", gd.Reason)
+						a.executor.dropFinding(f)
+					} else if strings.EqualFold(gd.Verdict, "DOWNGRADE") {
+						status = fmt.Sprintf("gate downgraded finding: %s", gd.Reason)
+					} else if gd.Reason != "" {
+						status = fmt.Sprintf("gate passed finding: %s", gd.Reason)
+					}
+				}
+				observation = observation + "\n" + strings.TrimSpace(status)
+				if accepted {
+					a.display.Finding(f.VulnClass, f.Severity, f.URL, f.Description)
+				}
+				if accepted && a.cfg.OnFinding != nil {
 					if err := a.cfg.OnFinding(ctx, f); err != nil {
 						a.log.Error("agent: OnFinding callback failed", "error", err)
 					}
@@ -380,6 +436,19 @@ endLoop:
 	a.display.Summary(len(findings), a.display.step, time.Since(startTime))
 
 	return findings, nil
+}
+
+func findingNeedsBrowserVerification(f Finding) bool {
+	cls := strings.ToLower(f.VulnClass)
+	return cls == "xss" || cls == "reflected_xss" || strings.Contains(cls, "xss")
+}
+
+func messagesByteLen(messages []llm.Message) int {
+	total := 0
+	for _, msg := range messages {
+		total += len(msg.Role) + len(msg.Content)
+	}
+	return total
 }
 
 // buildLLMMessages returns the message slice for one LLM call. It inserts
