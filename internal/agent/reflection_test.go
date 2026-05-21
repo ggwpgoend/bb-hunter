@@ -134,6 +134,28 @@ func TestReflect_CooldownSuppressesRepeatNotes(t *testing.T) {
 	}
 }
 
+func TestReflect_FiresOnSemanticProbeRepeat(t *testing.T) {
+	r := newReflectState()
+	payloads := []string{
+		`POST https://example.com/catalog/product/stock "Content-Type: application/xml" "body:<?xml version=\"1.0\"?><!DOCTYPE stockCheck [<!ENTITY xxe SYSTEM \"file:///etc/passwd\">]><stockCheck><storeId>&xxe;</storeId></stockCheck>"`,
+		`POST https://example.com/catalog/product/stock "Content-Type: application/xml" "body:<?xml version=\"1.0\"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM \"file:///etc/hosts\">]><stockCheck><productId>&xxe;</productId></stockCheck>"`,
+		`{"method":"POST","url":"https://example.com/catalog/product/stock","headers":{"Content-Type":"application/xml"},"body":"<?xml version=\"1.0\"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM \"file:///etc/passwd\">]><stockCheck><storeId>&xxe;</storeId><productId>1</productId></stockCheck>"}`,
+		`curl -s -X POST "https://example.com/catalog/product/stock" -H "Content-Type: application/xml" -d '<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><stockCheck><productId>1</productId><storeId>&xxe;</storeId></stockCheck>'`,
+	}
+	tools := []string{"http_raw", "http_raw", "http_request", "run_cmd"}
+	var note string
+	var ok bool
+	for i := range payloads {
+		note, ok = r.Observe(i+1, tools[i], payloads[i], resultOK)
+	}
+	if !ok {
+		t.Fatal("expected semantic repeat trigger to fire")
+	}
+	if !strings.Contains(note, "same semantic probe") || !strings.Contains(note, "xxe") {
+		t.Fatalf("unexpected note: %q", note)
+	}
+}
+
 func TestReflect_ArgsHashIgnoresWhitespaceAndCase(t *testing.T) {
 	a := hashArgs("https://example.com/path?id=1")
 	b := hashArgs("  https://example.com/path?id=1  ")

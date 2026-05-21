@@ -14,12 +14,14 @@ type mockProvider struct {
 	available bool
 	response  *Response
 	err       error
+	calls     int
 }
 
 func (m *mockProvider) Name() string    { return m.name }
 func (m *mockProvider) Model() string   { return m.model }
 func (m *mockProvider) Available() bool { return m.available }
 func (m *mockProvider) Complete(ctx context.Context, req *Request) (*Response, error) {
+	m.calls++
 	if m.err != nil {
 		return nil, m.err
 	}
@@ -80,6 +82,55 @@ func TestClient_Complete_Failover(t *testing.T) {
 	}
 	if resp.Provider != "provider2" {
 		t.Errorf("expected failover to provider2, got %s", resp.Provider)
+	}
+}
+
+func TestClient_StickySuccessfulProvider(t *testing.T) {
+	p1 := &mockProvider{name: "slow", model: "m1", available: true, response: &Response{Content: "p1"}}
+	p2 := &mockProvider{name: "stable", model: "m2", available: true, response: &Response{Content: "p2"}}
+
+	client, _ := NewClient(p1, p2)
+	resp, err := client.Complete(context.Background(), &Request{Messages: []Message{{Role: RoleUser, Content: "test"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Provider != "slow" {
+		t.Fatalf("first call should use first provider, got %s", resp.Provider)
+	}
+
+	resp, err = client.Complete(context.Background(), &Request{Messages: []Message{{Role: RoleUser, Content: "test"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Provider != "slow" {
+		t.Fatalf("second call should stick to last successful provider, got %s", resp.Provider)
+	}
+	if p2.calls != 0 {
+		t.Fatalf("fallback provider should not be called while sticky provider is healthy, calls=%d", p2.calls)
+	}
+}
+
+func TestClient_QuarantinesRepeatedTimeoutProvider(t *testing.T) {
+	p1 := &mockProvider{name: "timeout", model: "m1", available: true, err: context.DeadlineExceeded}
+	p2 := &mockProvider{name: "stable", model: "m2", available: true, response: &Response{Content: "ok"}}
+
+	client, _ := NewClient(p1, p2)
+	for i := 0; i < 2; i++ {
+		resp, err := client.Complete(context.Background(), &Request{Messages: []Message{{Role: RoleUser, Content: "test"}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.Provider != "stable" {
+			t.Fatalf("expected stable provider, got %s", resp.Provider)
+		}
+	}
+	callsAfterQuarantine := p1.calls
+	_, err := client.Complete(context.Background(), &Request{Messages: []Message{{Role: RoleUser, Content: "test"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p1.calls != callsAfterQuarantine {
+		t.Fatalf("quarantined provider was called again: before=%d after=%d", callsAfterQuarantine, p1.calls)
 	}
 }
 
