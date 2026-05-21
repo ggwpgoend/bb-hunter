@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"os/signal"
 	"strconv"
@@ -41,15 +42,15 @@ import (
 
 // stageModelCfg defines which model to use per provider for a given pipeline stage.
 type stageModelCfg struct {
-	Cerebras    string // fastest free reasoning tier (Qwen-3-235B); free deprecates 2026-05-27
-	Groq        string // LPU inference, Llama / Qwen / GPT-OSS catalog
-	Gemini      string // huge context (1M), good for analyst-style large-input stages
-	Samba       string
-	FreeTheAI   string
-	Canopy      string
-	CloseRouter string // pay-per-use; only used on premium stages by default
-	LLM7        string
-	UncloseAI   string
+	Cerebras     string // fastest free reasoning tier (Qwen-3-235B); free deprecates 2026-05-27
+	Groq         string // LPU inference, Llama / Qwen / GPT-OSS catalog
+	Gemini       string // huge context (1M), good for analyst-style large-input stages
+	Samba        string
+	FreeTheAI    string
+	Canopy       string
+	CloseRouter  string // pay-per-use; only used on premium stages by default
+	LLM7         string
+	UncloseAI    string
 	Pollinations string
 }
 
@@ -138,7 +139,7 @@ var stageDefaults = map[string]stageModelCfg{
 		FreeTheAI:    "gemini-2.5-flash",
 		Canopy:       "xiaomimimo/mimo-v2.5",
 		CloseRouter:  "anthropic/claude-3-5-sonnet-20241022",
-		LLM7:         "qwen2.5-coder-32b-instruct", // Specifically for coding
+		LLM7:         "qwen2.5-coder-32b-instruct",                             // Specifically for coding
 		UncloseAI:    "hf.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q4_K_M", // Coding specialist
 		Pollinations: "qwen-coder",
 	},
@@ -173,6 +174,36 @@ type stageBuildOpts struct {
 	CloseRouterKey   string
 	CloseRouterModel string  // overrides stageDefaults.CloseRouter when non-empty
 	CloseRouterUSD   float64 // daily USD spending cap for CloseRouter
+}
+
+func agentFindingToModel(f agent.Finding) *models.Finding {
+	now := time.Now()
+	mf := &models.Finding{
+		ID:              fmt.Sprintf("agent-%d", now.UnixNano()),
+		URL:             f.URL,
+		Method:          "GET",
+		VulnClass:       models.VulnClass(f.VulnClass),
+		Severity:        models.Severity(f.Severity),
+		ScannerEvidence: f.Evidence,
+		Hypothesis:      f.Description,
+		Confidence:      0.75,
+		Status:          models.StatusNew,
+		ReportMarkdown:  f.Description,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	}
+	if u, err := url.Parse(f.URL); err == nil {
+		mf.Host = u.Hostname()
+		mf.Path = u.Path
+		for name := range u.Query() {
+			mf.ParamNames = append(mf.ParamNames, name)
+		}
+	}
+	if mf.Severity == "" {
+		mf.Severity = models.SeverityMedium
+	}
+	mf.FindingKey = models.ComputeFindingKey(mf.Method, mf.URL, mf.NucleiTemplateID, mf.ParamNames)
+	return mf
 }
 
 // buildStageClient creates an LLM client optimized for a specific pipeline stage.
@@ -245,9 +276,13 @@ func buildStageClient(stage string, opts stageBuildOpts, logger *slog.Logger) *l
 		}
 	}
 	if ck != "" {
+		timeout := 60 * time.Second
+		if stage == "agent" {
+			timeout = 20 * time.Second
+		}
 		providers = append(providers, llm.NewOpenAICompatProvider(
 			"canopy", "https://inference.canopywave.io/v1", ck, cfg.Canopy).
-			WithSoftTimeout(60*time.Second))
+			WithSoftTimeout(timeout))
 	}
 
 	// LLM7 and UncloseAI are last-resort free fallbacks; they're slower and
@@ -258,9 +293,13 @@ func buildStageClient(stage string, opts stageBuildOpts, logger *slog.Logger) *l
 			WithSoftTimeout(30*time.Second))
 	}
 	if opts.UncloseAIKey != "" && cfg.UncloseAI != "" {
+		timeout := 45 * time.Second
+		if stage == "agent" {
+			timeout = 20 * time.Second
+		}
 		providers = append(providers, llm.NewOpenAICompatProvider(
 			"uncloseai", "https://hermes.ai.unturf.com/v1", opts.UncloseAIKey, cfg.UncloseAI).
-			WithSoftTimeout(45*time.Second))
+			WithSoftTimeout(timeout))
 	}
 
 	if len(providers) == 0 {
@@ -635,7 +674,6 @@ func main() {
 	quotas = append(quotas, cost.ProviderQuota{Name: "pollinations", DailyRequests: 5000})
 	logger.Info("LLM provider added", "name", "pollinations", "model", *pollinationsModel)
 
-
 	if len(providers) == 0 {
 		logger.Error("no LLM providers configured — provide at least one API key (--gemini-key, --cerebras-key, --groq-key, --samba-key, --openrouter-key, --together-key, --nvidia-key, --glhf-key, --chutes-key, --freetheai-key or env vars)")
 		os.Exit(1)
@@ -691,6 +729,22 @@ func main() {
 			agentClient, _ = llm.NewClient(providers...)
 		}
 
+		agentGate := gate.NewGate(nil, logger)
+		gateFinding := func(fctx context.Context, f agent.Finding) (agent.GateDecision, error) {
+			mf := agentFindingToModel(f)
+			gr := agentGate.EvaluateAlgorithmic(mf)
+			return agent.GateDecision{
+				Verdict: string(gr.Verdict),
+				Reason:  gr.Reasoning,
+				Score:   gr.Score,
+			}, nil
+		}
+
+		verifyFinding := func(fctx context.Context, f agent.Finding) (agent.VerificationResult, error) {
+			te := agent.NewToolExecutor("agent-browser", *screenshotDir, "")
+			return te.VerifyXSSExecution(fctx, f), nil
+		}
+
 		// Set up HITL callback if Telegram is configured
 		var onFinding agent.FindingCallback
 		var hitlBot *hitl.Bot
@@ -706,15 +760,7 @@ func main() {
 			logger.Info("HITL Telegram bot started for agent mode")
 
 			onFinding = func(fctx context.Context, f agent.Finding) error {
-				mf := &models.Finding{
-					ID:        fmt.Sprintf("agent-%d", time.Now().UnixNano()),
-					URL:       f.URL,
-					VulnClass: models.VulnClass(f.VulnClass),
-					Severity:  models.Severity(f.Severity),
-					ScannerEvidence: f.Evidence,
-					ReportMarkdown:  f.Description,
-					Status:    models.StatusNew,
-				}
+				mf := agentFindingToModel(f)
 				_, err := hitlBot.SendFinding(fctx, mf)
 				return err
 			}
@@ -730,6 +776,8 @@ func main() {
 			MaxSteps:        *agentMaxSteps,
 			Logger:          logger,
 			OnFinding:       onFinding,
+			GateFinding:     gateFinding,
+			VerifyFinding:   verifyFinding,
 			LLMDelayMs:      *agentDelayMs,
 		})
 

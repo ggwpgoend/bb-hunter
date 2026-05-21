@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"sort"
@@ -40,6 +41,7 @@ type SessionStore struct {
 	jsFiles   map[string]string         // url → JS source
 	recon     map[string]string         // key: tool|args → output
 	notes     []string
+	findings  []Finding
 	step      int
 }
 
@@ -88,6 +90,7 @@ func (s *SessionStore) Record(step int, tool, args, observation string) string {
 	case "browser_screenshot":
 		return observation
 	case "report_finding":
+		s.recordFinding(args)
 		return observation
 	default:
 		return observation
@@ -139,8 +142,8 @@ func (s *SessionStore) MemoryBlock(hypotheses []hypothesis) string {
 
 	var sb strings.Builder
 	sb.WriteString("[SESSION MEMORY]\n")
-	sb.WriteString(fmt.Sprintf("Step: %d | Endpoints: %d | HTTP stored: %d | JS analyzed: %d\n",
-		s.step, len(s.endpoints), len(s.responses), len(s.jsFiles)))
+	sb.WriteString(fmt.Sprintf("Step: %d | Endpoints: %d | HTTP stored: %d | JS analyzed: %d | Findings: %d\n",
+		s.step, len(s.endpoints), len(s.responses), len(s.jsFiles), len(s.findings)))
 
 	// Hypotheses section
 	if len(hypotheses) > 0 {
@@ -156,6 +159,21 @@ func (s *SessionStore) MemoryBlock(hypotheses []hypothesis) string {
 		}
 		if start > 0 {
 			sb.WriteString(fmt.Sprintf("- (... %d older hypotheses omitted ...)\n", start))
+		}
+	}
+
+	if len(s.findings) > 0 {
+		sb.WriteString("\nFINDINGS:\n")
+		start := 0
+		if len(s.findings) > 5 {
+			start = len(s.findings) - 5
+		}
+		for i := start; i < len(s.findings); i++ {
+			f := s.findings[i]
+			sb.WriteString(fmt.Sprintf("- %s %s @ %s\n", f.Severity, f.VulnClass, f.URL))
+		}
+		if start > 0 {
+			sb.WriteString(fmt.Sprintf("- (... %d older findings omitted ...)\n", start))
 		}
 	}
 
@@ -244,7 +262,7 @@ func (s *SessionStore) recordRecon(tool, args, observation string) string {
 	s.recon[key] = observation
 
 	if strings.HasPrefix(observation, "ERROR:") || strings.HasPrefix(observation, "TIMEOUT:") {
-		return observation
+		return truncateStoredObservation(observation, 500)
 	}
 
 	lines := strings.Split(strings.TrimSpace(observation), "\n")
@@ -305,13 +323,21 @@ func (s *SessionStore) recordBrowserSnapshot(observation string) string {
 func (s *SessionStore) recordBrowserEval(args, observation string) string {
 	// If fetching JS source, store it
 	if strings.Contains(args, "fetch(") || strings.Contains(args, "xhr") {
-		return observation
+		return truncateStoredObservation(observation, 1200)
 	}
-	return observation
+	return truncateStoredObservation(observation, 1200)
 }
 
 func (s *SessionStore) recordBrowserOpen(args, observation string) string {
 	return observation
+}
+
+func (s *SessionStore) recordFinding(args string) {
+	var f Finding
+	if err := json.Unmarshal([]byte(strings.TrimSpace(args)), &f); err != nil {
+		return
+	}
+	s.findings = append(s.findings, f)
 }
 
 // addEndpoint adds an endpoint to the list, deduplicating by method+url.
@@ -522,6 +548,13 @@ func summarizeHTTP(method, rawURL string, status int, headers, body string) stri
 	return sb.String()
 }
 
+func truncateStoredObservation(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + fmt.Sprintf("\n[... %d bytes total, stored — use recall if needed ...]", len(s))
+}
+
 // extractPaths extracts unique URL paths from a list of full URLs.
 func extractPaths(lines []string, maxPaths int) []string {
 	seen := make(map[string]bool)
@@ -559,5 +592,3 @@ func firstN(items []string, n int) []string {
 	}
 	return items[:n]
 }
-
-

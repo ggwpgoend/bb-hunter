@@ -130,8 +130,8 @@ func TestSessionStore_RecallErrors(t *testing.T) {
 	s := NewSessionStore()
 
 	tests := []struct {
-		query    string
-		wantErr  string
+		query   string
+		wantErr string
 	}{
 		{"", "ERROR:"},
 		{"http", "ERROR:"},
@@ -156,6 +156,8 @@ func TestSessionStore_MemoryBlock(t *testing.T) {
 		"HTTP 200 200 OK\nContent-Type: text/html\n\n<html></html>")
 	s.Record(2, "http_get", "https://example.com/api/v1/users",
 		"HTTP 200 200 OK\nContent-Type: application/json\n\n{}")
+	s.Record(3, "report_finding", `{"vuln_class":"idor","severity":"high","url":"https://example.com/api/v1/users/2"}`,
+		"OK: finding #1 reported")
 
 	hypotheses := []hypothesis{
 		{Class: "idor", URL: "https://example.com/api/v1/users", Why: "numeric id in URL", Created: time.Now(), Updated: time.Now(), Mentions: 1},
@@ -175,11 +177,32 @@ func TestSessionStore_MemoryBlock(t *testing.T) {
 	if !strings.Contains(block, "Endpoints: 2") {
 		t.Errorf("block should show endpoint count, got:\n%s", block)
 	}
+	if !strings.Contains(block, "Findings: 1") || !strings.Contains(block, "high idor") {
+		t.Errorf("block should show finding index, got:\n%s", block)
+	}
 	if !strings.Contains(block, "ATTACK SURFACE") {
 		t.Error("block should contain attack surface section")
 	}
 	if !strings.Contains(block, "recall") {
 		t.Error("block should mention recall tool")
+	}
+}
+
+func TestSessionStore_BoundsBrowserEvalAndErrors(t *testing.T) {
+	s := NewSessionStore()
+	long := strings.Repeat("A", 5000)
+
+	compact := s.Record(1, "browser_eval", "document.body.innerHTML", long)
+	if len(compact) > 1500 {
+		t.Fatalf("browser_eval compact summary too long: %d", len(compact))
+	}
+	if !strings.Contains(compact, "stored") {
+		t.Fatalf("compact summary should mention stored output: %q", compact)
+	}
+
+	errCompact := s.Record(2, "run_cmd", "missing-tool", "ERROR: "+long)
+	if len(errCompact) > 700 {
+		t.Fatalf("error compact summary too long: %d", len(errCompact))
 	}
 }
 
@@ -255,39 +278,39 @@ func TestSessionStore_ErrorObservationPassthrough(t *testing.T) {
 
 func TestSummarizeHTTP(t *testing.T) {
 	tests := []struct {
-		name    string
-		method  string
-		url     string
-		status  int
-		headers string
-		body    string
+		name         string
+		method       string
+		url          string
+		status       int
+		headers      string
+		body         string
 		wantContains []string
 	}{
 		{
-			name:    "HTML with forms",
-			method:  "GET",
-			url:     "https://example.com/",
-			status:  200,
-			headers: "Content-Type: text/html; charset=utf-8\nX-Frame-Options: DENY",
-			body:    "<html><body><form action='/login'><input/></form><script src='/app.js'></script></body></html>",
+			name:         "HTML with forms",
+			method:       "GET",
+			url:          "https://example.com/",
+			status:       200,
+			headers:      "Content-Type: text/html; charset=utf-8\nX-Frame-Options: DENY",
+			body:         "<html><body><form action='/login'><input/></form><script src='/app.js'></script></body></html>",
 			wantContains: []string{"HTTP 200", "text/html", "Forms: 1", "Scripts: 1", "stored"},
 		},
 		{
-			name:    "JSON API response",
-			method:  "GET",
-			url:     "https://example.com/api/users",
-			status:  200,
-			headers: "Content-Type: application/json",
-			body:    `{"users":[]}`,
+			name:         "JSON API response",
+			method:       "GET",
+			url:          "https://example.com/api/users",
+			status:       200,
+			headers:      "Content-Type: application/json",
+			body:         `{"users":[]}`,
 			wantContains: []string{"HTTP 200", "application/json", "stored"},
 		},
 		{
-			name:    "404 error",
-			method:  "GET",
-			url:     "https://example.com/notfound",
-			status:  404,
-			headers: "Content-Type: text/html",
-			body:    "Not Found",
+			name:         "404 error",
+			method:       "GET",
+			url:          "https://example.com/notfound",
+			status:       404,
+			headers:      "Content-Type: text/html",
+			body:         "Not Found",
 			wantContains: []string{"HTTP 404", "Body: Not Found", "stored"},
 		},
 	}

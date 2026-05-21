@@ -13,6 +13,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
 	"log/slog"
 	"net/http"
@@ -122,7 +123,7 @@ func (b *Bot) SendFinding(ctx context.Context, finding *models.Finding) (int, er
 	params := url.Values{
 		"chat_id":      {fmt.Sprintf("%d", b.chatID)},
 		"text":         {text},
-		"parse_mode":   {"Markdown"},
+		"parse_mode":   {"HTML"},
 		"reply_markup": {string(kbJSON)},
 	}
 
@@ -342,13 +343,13 @@ func (b *Bot) updateDecisionMessage(ctx context.Context, pf *PendingFinding, sta
 		statusEmoji = "TIMED OUT"
 	}
 
-	newText := formatFinding(pf.Finding) + fmt.Sprintf("\n\n*Status: %s*", statusEmoji)
+	newText := formatFinding(pf.Finding) + fmt.Sprintf("\n\n<b>Status: %s</b>", html.EscapeString(statusEmoji))
 
 	params := url.Values{
 		"chat_id":    {fmt.Sprintf("%d", b.chatID)},
 		"message_id": {fmt.Sprintf("%d", pf.MessageID)},
 		"text":       {newText},
-		"parse_mode": {"Markdown"},
+		"parse_mode": {"HTML"},
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST",
@@ -496,34 +497,40 @@ type callbackQuery struct {
 func formatFinding(f *models.Finding) string {
 	var sb strings.Builder
 
-	sb.WriteString(fmt.Sprintf("*[BB-Hunter] Новая находка*\n\n"))
-	sb.WriteString(fmt.Sprintf("*ID:* `%s`\n", f.ID))
-	sb.WriteString(fmt.Sprintf("*URL:* `%s`\n", f.URL))
-	sb.WriteString(fmt.Sprintf("*Метод:* %s\n", f.Method))
+	sb.WriteString("<b>[BB-Hunter] Новая находка</b>\n\n")
+	sb.WriteString(fmt.Sprintf("<b>ID:</b> <code>%s</code>\n", html.EscapeString(f.ID)))
+	sb.WriteString(fmt.Sprintf("<b>URL:</b> <code>%s</code>\n", html.EscapeString(f.URL)))
+	sb.WriteString(fmt.Sprintf("<b>Метод:</b> %s\n", html.EscapeString(f.Method)))
 
 	if f.VulnClass != "" {
-		sb.WriteString(fmt.Sprintf("*Класс:* %s\n", f.VulnClass))
+		sb.WriteString(fmt.Sprintf("<b>Класс:</b> %s\n", html.EscapeString(string(f.VulnClass))))
 	}
 	if f.Severity != "" {
-		sb.WriteString(fmt.Sprintf("*Severity:* %s\n", f.Severity))
+		sb.WriteString(fmt.Sprintf("<b>Severity:</b> %s\n", html.EscapeString(string(f.Severity))))
 	}
 	if f.Confidence > 0 {
-		sb.WriteString(fmt.Sprintf("*Confidence:* %.0f%%\n", f.Confidence*100))
+		sb.WriteString(fmt.Sprintf("<b>Confidence:</b> %.0f%%\n", f.Confidence*100))
 	}
 	if f.Hypothesis != "" {
-		sb.WriteString(fmt.Sprintf("\n*Гипотеза:*\n%s\n", f.Hypothesis))
+		sb.WriteString(fmt.Sprintf("\n<b>Гипотеза:</b>\n%s\n", html.EscapeString(f.Hypothesis)))
 	}
 	if f.NucleiTemplateID != "" {
-		sb.WriteString(fmt.Sprintf("\n*Template:* `%s`\n", f.NucleiTemplateID))
+		sb.WriteString(fmt.Sprintf("\n<b>Template:</b> <code>%s</code>\n", html.EscapeString(f.NucleiTemplateID)))
 	}
 
 	// Truncate report if too long for Telegram (4096 char limit)
 	if f.ReportMarkdown != "" {
 		report := f.ReportMarkdown
+		truncated := false
 		if len(report) > 2000 {
-			report = report[:2000] + "\n\n_(отчёт обрезан)_"
+			report = report[:2000]
+			truncated = true
 		}
-		sb.WriteString(fmt.Sprintf("\n--- Отчёт ---\n%s\n", report))
+		report = html.EscapeString(report)
+		if truncated {
+			report += "\n\n<i>(отчёт обрезан)</i>"
+		}
+		sb.WriteString(fmt.Sprintf("\n<b>--- Отчёт ---</b>\n%s\n", report))
 	}
 
 	return sb.String()

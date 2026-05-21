@@ -205,3 +205,116 @@ func TestAgent_Run_StopSignalInjectsSystemNote(t *testing.T) {
 		t.Errorf("expected exactly 1 SYSTEM NOTE injection, got %d", count)
 	}
 }
+
+func TestAgent_Run_GateKillDropsFindingAndSkipsCallback(t *testing.T) {
+	sp := &scriptedProvider{responses: []string{
+		`THINK: found weak issue
+ACTION: report_finding {"vuln_class":"info_disclosure","severity":"low","url":"https://example.com/debug","description":"debug page","evidence":"debug page"}`,
+		"THINK: done\nACTION: done",
+	}}
+	client, _ := llm.NewClient(sp)
+
+	callbacks := 0
+	a := New(Config{
+		Target:     "example.com",
+		LLMClient:  client,
+		MaxSteps:   2,
+		LLMDelayMs: 1,
+		GateFinding: func(ctx context.Context, finding Finding) (GateDecision, error) {
+			return GateDecision{Verdict: "KILL", Reason: "low quality"}, nil
+		},
+		OnFinding: func(ctx context.Context, finding Finding) error {
+			callbacks++
+			return nil
+		},
+	})
+
+	findings, err := a.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if len(findings) != 0 {
+		t.Fatalf("expected killed finding to be dropped, got %d", len(findings))
+	}
+	if callbacks != 0 {
+		t.Fatalf("expected callback to be skipped, got %d calls", callbacks)
+	}
+}
+
+func TestAgent_Run_GatePassCallsCallback(t *testing.T) {
+	sp := &scriptedProvider{responses: []string{
+		`THINK: found issue
+ACTION: report_finding {"vuln_class":"idor","severity":"high","url":"https://example.com/api/users/2","description":"IDOR allows reading another user profile with a changed numeric id","evidence":"200 response for another user's profile"}`,
+		"THINK: done\nACTION: done",
+	}}
+	client, _ := llm.NewClient(sp)
+
+	callbacks := 0
+	a := New(Config{
+		Target:     "example.com",
+		LLMClient:  client,
+		MaxSteps:   2,
+		LLMDelayMs: 1,
+		GateFinding: func(ctx context.Context, finding Finding) (GateDecision, error) {
+			return GateDecision{Verdict: "PASS", Reason: "high quality", Score: 6}, nil
+		},
+		OnFinding: func(ctx context.Context, finding Finding) error {
+			callbacks++
+			return nil
+		},
+	})
+
+	findings, err := a.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if len(findings) != 1 {
+		t.Fatalf("expected one accepted finding, got %d", len(findings))
+	}
+	if callbacks != 1 {
+		t.Fatalf("expected callback once, got %d", callbacks)
+	}
+}
+
+func TestAgent_Run_XSSVerificationFailDropsBeforeGateAndCallback(t *testing.T) {
+	sp := &scriptedProvider{responses: []string{
+		`THINK: found reflected xss
+ACTION: report_finding {"vuln_class":"xss","severity":"high","url":"https://example.com/search?q=%3Csvg%2Fonload%3Dalert(1)%3E","description":"payload reflected","evidence":"<svg/onload=alert(1)> reflected"}`,
+		"THINK: done\nACTION: done",
+	}}
+	client, _ := llm.NewClient(sp)
+
+	gateCalls := 0
+	callbacks := 0
+	a := New(Config{
+		Target:     "example.com",
+		LLMClient:  client,
+		MaxSteps:   2,
+		LLMDelayMs: 1,
+		VerifyFinding: func(ctx context.Context, finding Finding) (VerificationResult, error) {
+			return VerificationResult{Verified: false, Reason: "no reflection"}, nil
+		},
+		GateFinding: func(ctx context.Context, finding Finding) (GateDecision, error) {
+			gateCalls++
+			return GateDecision{Verdict: "PASS"}, nil
+		},
+		OnFinding: func(ctx context.Context, finding Finding) error {
+			callbacks++
+			return nil
+		},
+	})
+
+	findings, err := a.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if len(findings) != 0 {
+		t.Fatalf("expected rejected XSS finding to be dropped, got %d", len(findings))
+	}
+	if gateCalls != 0 {
+		t.Fatalf("expected gate to be skipped after verifier failure, got %d calls", gateCalls)
+	}
+	if callbacks != 0 {
+		t.Fatalf("expected callback to be skipped, got %d calls", callbacks)
+	}
+}

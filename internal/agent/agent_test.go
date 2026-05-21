@@ -8,8 +8,8 @@ import (
 
 func TestParseResponse(t *testing.T) {
 	tests := []struct {
-		name     string
-		input    string
+		name      string
+		input     string
 		wantThink string
 		wantTool  string
 		wantArgs  string
@@ -131,6 +131,47 @@ func TestToolExecutor_ReportFinding(t *testing.T) {
 	result = te.reportFinding(`{"severity":"high"}`)
 	if !startsWith(result, "ERROR:") {
 		t.Errorf("expected ERROR for missing fields, got %s", result)
+	}
+}
+
+func TestToolExecutor_DropLastFinding(t *testing.T) {
+	te := NewToolExecutor("", "", "")
+	if _, ok := te.DropLastFinding(); ok {
+		t.Fatal("DropLastFinding should report false on empty list")
+	}
+	te.reportFinding(`{"vuln_class":"xss","severity":"high","url":"https://example.com/a","description":"a","evidence":"a"}`)
+	te.reportFinding(`{"vuln_class":"idor","severity":"medium","url":"https://example.com/b","description":"b","evidence":"b"}`)
+
+	dropped, ok := te.DropLastFinding()
+	if !ok {
+		t.Fatal("DropLastFinding should report true")
+	}
+	if dropped.URL != "https://example.com/b" {
+		t.Fatalf("dropped URL = %q", dropped.URL)
+	}
+	if got := len(te.Findings()); got != 1 {
+		t.Fatalf("expected 1 finding left, got %d", got)
+	}
+	if te.Findings()[0].URL != "https://example.com/a" {
+		t.Fatalf("wrong finding left: %+v", te.Findings()[0])
+	}
+}
+
+func TestXSSPayloadHelpers(t *testing.T) {
+	f := Finding{
+		URL:         "https://example.com/search?q=%3Csvg%2Fonload%3Dalert(1)%3E",
+		Description: "reflected payload",
+		Evidence:    "<img src=x onerror=alert(1)>",
+	}
+	payloads := xssEvidencePayloads(f)
+	if len(payloads) < 2 {
+		t.Fatalf("expected payloads from URL and evidence, got %#v", payloads)
+	}
+	if !containsAlertMarker("browser emitted javascript dialog with alert(1)") {
+		t.Fatal("expected alert marker detection")
+	}
+	if !containsScriptMarker("payload reflected as <svg onload=alert(1)>") {
+		t.Fatal("expected script marker detection")
 	}
 }
 

@@ -16,8 +16,8 @@ type mockProvider struct {
 	err       error
 }
 
-func (m *mockProvider) Name() string  { return m.name }
-func (m *mockProvider) Model() string { return m.model }
+func (m *mockProvider) Name() string    { return m.name }
+func (m *mockProvider) Model() string   { return m.model }
 func (m *mockProvider) Available() bool { return m.available }
 func (m *mockProvider) Complete(ctx context.Context, req *Request) (*Response, error) {
 	if m.err != nil {
@@ -55,6 +55,9 @@ func TestClient_Complete_FirstAvailable(t *testing.T) {
 	}
 	if resp.Content != "hello from p1" {
 		t.Errorf("unexpected content: %s", resp.Content)
+	}
+	if resp.Latency == 0 {
+		t.Error("expected client to populate response latency")
 	}
 }
 

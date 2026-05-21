@@ -403,12 +403,36 @@ func TestFormatFinding(t *testing.T) {
 		"high",
 		"90%",
 		"XSS",
+		"<b>",
+		"<code>",
 	}
 
 	for _, check := range checks {
 		if !containsStr(text, check) {
 			t.Errorf("formatted text should contain %q", check)
 		}
+	}
+}
+
+func TestFormatFindingEscapesHTML(t *testing.T) {
+	f := testFinding("f-format-escape")
+	f.URL = `https://example.com/?q=<script>alert(1)</script>&x=1`
+	f.Hypothesis = `param <img src=x onerror=alert(1)> is reflected`
+	f.ReportMarkdown = "# XSS\n\n`payload`: <svg/onload=alert(1)> & __proto__"
+
+	text := formatFinding(f)
+	for _, raw := range []string{"<script>", "<img", "<svg/onload"} {
+		if containsStr(text, raw) {
+			t.Errorf("formatted text should escape raw HTML %q: %s", raw, text)
+		}
+	}
+	for _, escaped := range []string{"&lt;script&gt;", "&lt;img", "&lt;svg/onload", "&amp;"} {
+		if !containsStr(text, escaped) {
+			t.Errorf("formatted text should contain escaped %q: %s", escaped, text)
+		}
+	}
+	if !containsStr(text, "__proto__") {
+		t.Error("formatted text should preserve non-HTML payload text")
 	}
 }
 

@@ -55,11 +55,11 @@ type Request struct {
 
 // Response is the output from a completion call.
 type Response struct {
-	Content      string `json:"content"`
-	Provider     string `json:"provider"`
-	Model        string `json:"model"`
-	InputTokens  int    `json:"input_tokens"`
-	OutputTokens int    `json:"output_tokens"`
+	Content      string        `json:"content"`
+	Provider     string        `json:"provider"`
+	Model        string        `json:"model"`
+	InputTokens  int           `json:"input_tokens"`
+	OutputTokens int           `json:"output_tokens"`
 	Latency      time.Duration `json:"latency"`
 
 	// Whether the sentinel UUID was found in the output (prompt injection indicator)
@@ -117,15 +117,23 @@ func (c *Client) Complete(ctx context.Context, req *Request) (*Response, error) 
 		p := c.providers[idx]
 
 		if !p.Available() {
-			slog.Debug("llm: provider skipped (not available)", "provider", p.Name(), "model", p.Model())
+			slog.Info("llm: provider skipped", "provider", p.Name(), "model", p.Model(), "reason", "not_available")
 			continue
 		}
 
+		start := time.Now()
+		slog.Debug("llm: provider attempt", "provider", p.Name(), "model", p.Model(), "attempt", i+1, "providers", n)
 		resp, err := p.Complete(ctx, req)
+		latency := time.Since(start)
 		if err != nil {
+			slog.Warn("llm: provider failed", "provider", p.Name(), "model", p.Model(), "attempt", i+1, "latency", latency, "error", err)
 			lastErr = fmt.Errorf("%s: %w", p.Name(), err)
 			continue
 		}
+		if resp.Latency == 0 {
+			resp.Latency = latency
+		}
+		slog.Info("llm: provider succeeded", "provider", p.Name(), "model", p.Model(), "attempt", i+1, "latency", latency)
 
 		if req.SentinelUUID != "" {
 			resp.SentinelLeaked = containsSentinel(resp.Content, req.SentinelUUID)
@@ -142,11 +150,11 @@ func (c *Client) Complete(ctx context.Context, req *Request) (*Response, error) 
 
 // HealthResult contains the result of a provider health check.
 type HealthResult struct {
-	Provider  string        `json:"provider"`
-	Model     string        `json:"model"`
-	OK        bool          `json:"ok"`
-	Latency   time.Duration `json:"latency"`
-	Error     string        `json:"error,omitempty"`
+	Provider string        `json:"provider"`
+	Model    string        `json:"model"`
+	OK       bool          `json:"ok"`
+	Latency  time.Duration `json:"latency"`
+	Error    string        `json:"error,omitempty"`
 }
 
 // CheckHealth sends a minimal request to each configured provider
@@ -167,7 +175,7 @@ func (c *Client) CheckHealth(ctx context.Context) []HealthResult {
 
 		checkCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 		req := &Request{
-			Messages:    []Message{{Role: RoleUser, Content: "Reply with exactly: ok"}},
+			Messages: []Message{{Role: RoleUser, Content: "Reply with exactly: ok"}},
 			// 16 tokens is enough for "ok" on every provider while still
 			// keeping the probe cheap. DisableThinking covers Gemini 2.5+,
 			// where thinking tokens would otherwise consume the budget.
