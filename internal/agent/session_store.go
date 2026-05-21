@@ -261,6 +261,11 @@ func (s *SessionStore) recordRecon(tool, args, observation string) string {
 	key := tool + "|" + args
 	s.recon[key] = observation
 
+	// For katana, extract URLs into endpoints even from TIMEOUT output.
+	if tool == "run_katana" {
+		return s.recordKatana(observation)
+	}
+
 	if strings.HasPrefix(observation, "ERROR:") || strings.HasPrefix(observation, "TIMEOUT:") {
 		return truncateStoredObservation(observation, 500)
 	}
@@ -269,11 +274,6 @@ func (s *SessionStore) recordRecon(tool, args, observation string) string {
 	count := len(lines)
 
 	switch tool {
-	case "run_katana":
-		// Extract unique paths
-		paths := extractPaths(lines, 8)
-		return fmt.Sprintf("Found %d endpoints. Key paths: %s. Full list stored — use `recall search <keyword>` to find specific endpoints.",
-			count, strings.Join(paths, ", "))
 	case "run_subfinder":
 		return fmt.Sprintf("Found %d subdomains. First: %s. Full list stored.",
 			count, strings.Join(firstN(lines, 5), ", "))
@@ -291,6 +291,36 @@ func (s *SessionStore) recordRecon(tool, args, observation string) string {
 		}
 		return observation
 	}
+}
+
+// recordKatana parses katana output (including TIMEOUT partial output) and
+// registers discovered URLs as endpoints so they appear in recall endpoints.
+func (s *SessionStore) recordKatana(observation string) string {
+	if strings.HasPrefix(observation, "ERROR:") {
+		return truncateStoredObservation(observation, 500)
+	}
+
+	lines := strings.Split(strings.TrimSpace(observation), "\n")
+	var urlLines []string
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "http://") || strings.HasPrefix(line, "https://") {
+			urlLines = append(urlLines, line)
+		}
+	}
+
+	// Register each discovered URL as an endpoint.
+	for _, u := range urlLines {
+		s.addEndpoint(u, "GET", 0, s.step, "katana")
+	}
+
+	paths := extractPaths(urlLines, 8)
+	prefix := ""
+	if strings.HasPrefix(observation, "TIMEOUT:") {
+		prefix = "(partial) "
+	}
+	return fmt.Sprintf("%sFound %d endpoints. Key paths: %s. Full list stored — use `recall endpoints` or `recall search <keyword>` to find specific endpoints.",
+		prefix, len(urlLines), strings.Join(paths, ", "))
 }
 
 func (s *SessionStore) recordBrowserSnapshot(observation string) string {

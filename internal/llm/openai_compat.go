@@ -33,6 +33,10 @@ type OpenAICompatProvider struct {
 	// context.WithTimeout is applied so a slow provider fails fast and the
 	// round-robin moves on. 0 → use httpClient.Timeout (120s).
 	softTimeout time.Duration
+
+	// consecutiveFailures tracks non-429 errors. After 3 consecutive
+	// non-success responses the provider is temporarily disabled.
+	consecutiveFailures int
 }
 
 // NewOpenAICompatProvider creates a provider for any OpenAI-compatible endpoint.
@@ -158,6 +162,18 @@ func (o *OpenAICompatProvider) Complete(ctx context.Context, req *Request) (*Res
 
 	httpResp, err := o.httpClient.Do(httpReq)
 	if err != nil {
+		o.mu.Lock()
+		o.consecutiveFailures++
+		if o.consecutiveFailures >= 3 {
+			maxCD := o.maxCooldownSec
+			if maxCD <= 0 {
+				maxCD = 300
+			}
+			o.cooldownSec = maxCD
+			o.rateLimited = true
+			o.retryAfter = time.Now().Add(time.Duration(maxCD) * time.Second)
+		}
+		o.mu.Unlock()
 		return nil, fmt.Errorf("%s: request failed: %w", o.name, err)
 	}
 	defer httpResp.Body.Close()
@@ -183,11 +199,27 @@ func (o *OpenAICompatProvider) Complete(ctx context.Context, req *Request) (*Res
 		}
 		o.rateLimited = true
 		o.retryAfter = time.Now().Add(time.Duration(o.cooldownSec) * time.Second)
+		o.consecutiveFailures++
 		o.mu.Unlock()
 		return nil, fmt.Errorf("%w: %s: %s", ErrRateLimited, o.name, string(respBody))
 	}
 
 	if httpResp.StatusCode != 200 {
+		o.mu.Lock()
+		o.consecutiveFailures++
+		// Permanent-looking failures (403 Cloudflare, 400 geo-block, etc.):
+		// after 3 consecutive non-success responses, disable the provider
+		// with max cooldown so it stops wasting time on every step.
+		if o.consecutiveFailures >= 3 {
+			maxCD := o.maxCooldownSec
+			if maxCD <= 0 {
+				maxCD = 300
+			}
+			o.cooldownSec = maxCD
+			o.rateLimited = true
+			o.retryAfter = time.Now().Add(time.Duration(maxCD) * time.Second)
+		}
+		o.mu.Unlock()
 		return nil, fmt.Errorf("%s: HTTP %d: %s", o.name, httpResp.StatusCode, string(respBody))
 	}
 
@@ -204,10 +236,11 @@ func (o *OpenAICompatProvider) Complete(ctx context.Context, req *Request) (*Res
 		return nil, fmt.Errorf("%s: empty response", o.name)
 	}
 
-	// Successful completion: reset adaptive cooldown so future 429s
-	// start from the minimum backoff again.
+	// Successful completion: reset adaptive cooldown and failure counter
+	// so future errors start from scratch.
 	o.mu.Lock()
 	o.cooldownSec = 0
+	o.consecutiveFailures = 0
 	o.mu.Unlock()
 
 	return &Response{
