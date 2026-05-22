@@ -75,12 +75,36 @@ type ToolExecutor struct {
 }
 
 // Finding is a vulnerability discovered by the agent.
+//
+// Fields prefixed with ★ are filled by the post-finding pipeline (Gate /
+// Exploiter / Sandbox / Reporter) after the LLM calls report_finding. The
+// LLM only needs to provide the first 5 fields plus optional Confidence /
+// ProofLevel; everything else is overwritten by the pipeline.
 type Finding struct {
-	VulnClass   string `json:"vuln_class"`
-	Severity    string `json:"severity"`
-	URL         string `json:"url"`
-	Description string `json:"description"`
-	Evidence    string `json:"evidence"`
+	// Filled by the LLM via report_finding JSON
+	VulnClass   string  `json:"vuln_class"`
+	Severity    string  `json:"severity"`
+	URL         string  `json:"url"`
+	Description string  `json:"description"`
+	Evidence    string  `json:"evidence"`
+	Confidence  float64 `json:"confidence,omitempty"`  // 0.0-1.0; LLM self-assessment
+	ProofLevel  string  `json:"proof_level,omitempty"` // direct | behavioral | inferred
+
+	// ★ Filled by the post-finding pipeline. Not part of the LLM contract.
+	ID              string `json:"id,omitempty"`
+	GateVerdict     string `json:"gate_verdict,omitempty"`     // PASS | KILL | DOWNGRADE
+	GateScore       int    `json:"gate_score,omitempty"`       // 0-7
+	GateReasoning   string `json:"gate_reasoning,omitempty"`
+	PoCScript       string `json:"poc_script,omitempty"`
+	PoCInterpreter  string `json:"poc_interpreter,omitempty"`
+	PoCDescription  string `json:"poc_description,omitempty"`
+	SandboxVerified bool   `json:"sandbox_verified,omitempty"`
+	SandboxEvidence string `json:"sandbox_evidence,omitempty"`
+	SandboxStdout   string `json:"sandbox_stdout,omitempty"`
+	SandboxStderr   string `json:"sandbox_stderr,omitempty"`
+	SandboxExitCode int    `json:"sandbox_exit_code,omitempty"`
+	ReportMarkdown  string `json:"report_markdown,omitempty"`
+	FindingDir      string `json:"finding_dir,omitempty"` // persistence directory
 }
 
 // NewToolExecutor creates a tool executor.
@@ -102,6 +126,17 @@ func NewToolExecutor(agentBrowserBin, screenshotDir, proxyAddr string) *ToolExec
 // Findings returns all reported findings.
 func (te *ToolExecutor) Findings() []Finding {
 	return te.findings
+}
+
+// UpdateLastFinding replaces the most recently appended finding with the
+// mutated copy. Used by the post-finding pipeline to write back enrichment
+// (gate verdict, PoC, sandbox result, report markdown) without going through
+// equality-based lookup (which breaks once any field has been set).
+func (te *ToolExecutor) UpdateLastFinding(f Finding) {
+	if len(te.findings) == 0 {
+		return
+	}
+	te.findings[len(te.findings)-1] = f
 }
 
 func (te *ToolExecutor) DropLastFinding() (Finding, bool) {

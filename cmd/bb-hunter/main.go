@@ -178,19 +178,48 @@ type stageBuildOpts struct {
 
 func agentFindingToModel(f agent.Finding) *models.Finding {
 	now := time.Now()
+	id := f.ID
+	if id == "" {
+		id = fmt.Sprintf("agent-%d", now.UnixNano())
+	}
+	confidence := f.Confidence
+	if confidence == 0 {
+		confidence = 0.75
+	}
+	evidence := f.Evidence
+	if f.SandboxStdout != "" || f.SandboxStderr != "" {
+		var sb strings.Builder
+		sb.WriteString(evidence)
+		sb.WriteString("\n\n--- sandbox ---\n")
+		fmt.Fprintf(&sb, "verified=%v exit_code=%d\n", f.SandboxVerified, f.SandboxExitCode)
+		if f.SandboxEvidence != "" {
+			fmt.Fprintf(&sb, "evidence: %s\n", f.SandboxEvidence)
+		}
+		if f.SandboxStdout != "" {
+			fmt.Fprintf(&sb, "stdout:\n%s\n", truncatedString(f.SandboxStdout, 2000))
+		}
+		evidence = sb.String()
+	}
 	mf := &models.Finding{
-		ID:              fmt.Sprintf("agent-%d", now.UnixNano()),
+		ID:              id,
 		URL:             f.URL,
 		Method:          "GET",
 		VulnClass:       models.VulnClass(f.VulnClass),
 		Severity:        models.Severity(f.Severity),
-		ScannerEvidence: f.Evidence,
+		ScannerEvidence: evidence,
 		Hypothesis:      f.Description,
-		Confidence:      0.75,
+		Confidence:      confidence,
 		Status:          models.StatusNew,
-		ReportMarkdown:  f.Description,
 		CreatedAt:       now,
 		UpdatedAt:       now,
+	}
+	// Prefer Reporter's markdown; only fall back to the LLM description
+	// when the report wasn't generated (e.g. Reporter LLM unavailable).
+	if f.ReportMarkdown != "" {
+		mf.ReportMarkdown = f.ReportMarkdown
+		mf.Status = models.StatusReported
+	} else {
+		mf.ReportMarkdown = f.Description
 	}
 	if u, err := url.Parse(f.URL); err == nil {
 		mf.Host = u.Hostname()
@@ -204,6 +233,13 @@ func agentFindingToModel(f agent.Finding) *models.Finding {
 	}
 	mf.FindingKey = models.ComputeFindingKey(mf.Method, mf.URL, mf.NucleiTemplateID, mf.ParamNames)
 	return mf
+}
+
+func truncatedString(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "\n... [truncated]"
 }
 
 // buildStageClient creates an LLM client optimized for a specific pipeline stage.
@@ -375,6 +411,8 @@ func main() {
 	agentMode := flag.Bool("agent", false, "enable autonomous LLM agent mode (AI drives the tools)")
 	agentMaxSteps := flag.Int("agent-steps", 0, "max steps for agent mode (0 = unlimited; first Ctrl+C requests a graceful stop, second hard-kills)")
 	agentDelayMs := flag.Int("agent-delay", 3000, "delay between LLM calls in ms (100 = 10 req/sec)")
+	findingsDir := flag.String("findings-dir", "findings", "directory where per-finding artifacts (finding.json, report.ru.md, poc.*, sandbox.json) are persisted in agent mode")
+	platformName := flag.String("platform", "standoff", "BB platform name used by the Reporter stage (standoff|bizone|bugbountyru)")
 	flag.Parse()
 
 	// Fallback to env vars for Telegram config
@@ -729,13 +767,36 @@ func main() {
 			agentClient, _ = llm.NewClient(providers...)
 		}
 
-		agentGate := gate.NewGate(nil, logger)
+		// Gate: prefer LLM-backed 7-question gate; fall back to the
+		// algorithmic heuristic when the LLM client / call fails.
+		var agentGateLLM *llm.Client
+		if usePerStage {
+			agentGateLLM = gateLLM
+		}
+		agentGate := gate.NewGate(agentGateLLM, logger)
 		gateFinding := func(fctx context.Context, f agent.Finding) (agent.GateDecision, error) {
 			mf := agentFindingToModel(f)
-			gr := agentGate.EvaluateAlgorithmic(mf)
+			var (
+				gr  *gate.Result
+				err error
+			)
+			if agentGateLLM != nil {
+				gr, err = agentGate.Evaluate(fctx, mf)
+				if err != nil {
+					logger.Warn("agent gate: LLM evaluation failed, falling back to algorithmic",
+						"finding_id", mf.ID, "error", err)
+					gr = agentGate.EvaluateAlgorithmic(mf)
+				}
+			} else {
+				gr = agentGate.EvaluateAlgorithmic(mf)
+			}
+			reason := gr.Reasoning
+			if reason == "" {
+				reason = fmt.Sprintf("%d/7 passed", gr.Score)
+			}
 			return agent.GateDecision{
 				Verdict: string(gr.Verdict),
-				Reason:  gr.Reasoning,
+				Reason:  reason,
 				Score:   gr.Score,
 			}, nil
 		}
@@ -743,6 +804,84 @@ func main() {
 		verifyFinding := func(fctx context.Context, f agent.Finding) (agent.VerificationResult, error) {
 			te := agent.NewToolExecutor("agent-browser", *screenshotDir, "")
 			return te.VerifyXSSExecution(fctx, f), nil
+		}
+
+		// Reporter: generate Russian markdown report after gate passes.
+		var reporterInst *reporter.Reporter
+		if usePerStage && reporterLLM != nil {
+			reporterInst = reporter.NewReporter(reporterLLM, *platformName, logger)
+		}
+		var generateReport agent.FindingReporter
+		if reporterInst != nil {
+			generateReport = func(fctx context.Context, f agent.Finding) (string, error) {
+				mf := agentFindingToModel(f)
+				out, err := reporterInst.GenerateReport(fctx, mf)
+				if err != nil {
+					return "", err
+				}
+				return out.ReportMarkdown, nil
+			}
+		}
+
+		// Exploiter + Sandbox: generate a deterministic PoC and run it in
+		// a rootless Docker sandbox. Only wired when both LLM client and
+		// Docker are available.
+		var (
+			generatePoC agent.FindingPoCGenerator
+			runPoC      agent.FindingPoCRunner
+		)
+		if usePerStage && exploiterLLM != nil {
+			expInst := exploiter.NewExploiter(exploiterLLM, logger)
+			sbInst := sandbox.New(sandbox.Config{
+				BaseImage:   *sandboxImage,
+				MemoryLimit: *sandboxMemory,
+				Timeout:     *sandboxTimeout,
+				Logger:      logger,
+			})
+			verInst := exploiter.NewVerifier(sbInst, logger)
+
+			sandboxAvailable := sbInst.Available()
+			if !sandboxAvailable {
+				logger.Warn("agent: Docker not available — Exploiter+Sandbox stages disabled")
+			} else {
+				generatePoC = func(fctx context.Context, f agent.Finding) (agent.PoC, error) {
+					mf := agentFindingToModel(f)
+					poc, err := expInst.GeneratePoC(fctx, mf)
+					if err != nil {
+						return agent.PoC{}, err
+					}
+					return agent.PoC{
+						Script:      poc.Script,
+						Interpreter: poc.Interpreter,
+						Description: poc.Description,
+					}, nil
+				}
+				runPoC = func(fctx context.Context, f agent.Finding, p agent.PoC) (agent.PoCResult, error) {
+					vp := &exploiter.PoC{
+						FindingID:   f.ID,
+						Script:      p.Script,
+						Interpreter: p.Interpreter,
+						Description: p.Description,
+					}
+					vr, err := verInst.Verify(fctx, vp)
+					if err != nil {
+						return agent.PoCResult{Error: err.Error()}, err
+					}
+					out := agent.PoCResult{
+						Verified: vr.Verified,
+						Evidence: vr.Evidence,
+						ExitCode: vr.ExitCode,
+						Duration: vr.Duration,
+						TimedOut: vr.TimedOut,
+						Error:    vr.Error,
+					}
+					if vr.SandboxOut != nil {
+						out.Stdout = vr.SandboxOut.Stdout
+						out.Stderr = vr.SandboxOut.Stderr
+					}
+					return out, nil
+				}
+			}
 		}
 
 		// Set up HITL callback if Telegram is configured
@@ -778,6 +917,10 @@ func main() {
 			OnFinding:       onFinding,
 			GateFinding:     gateFinding,
 			VerifyFinding:   verifyFinding,
+			GeneratePoC:     generatePoC,
+			RunPoC:          runPoC,
+			GenerateReport:  generateReport,
+			FindingsDir:     *findingsDir,
 			LLMDelayMs:      *agentDelayMs,
 		})
 
