@@ -90,7 +90,7 @@ const gateSystemPrompt = `Ты — валидатор качества bug bount
 6. УНИКАЛЬНОСТЬ: Это не типичная false positive (scanner artifact, WAF block, default page)?
 7. REPORT QUALITY: Описание достаточно для понимания и воспроизведения?
 
-Формат ответа (строго JSON):
+Формат ответа: ТОЛЬКО RAW JSON, без markdown-обёртки, без префиксов/постфиксов. Никаких тройных бэктиков, никаких fenced code-blockов.
 {
   "questions": [
     {"question": "reproducibility", "passed": true, "detail": "..."},
@@ -107,7 +107,9 @@ const gateSystemPrompt = `Ты — валидатор качества bug bount
 }
 
 Дополнительные правила:
-- Если скоуп или программа неизвестны — ставь scope.passed: true (не блокируй из-за отсутствия информации о скоупе).`
+- Если скоуп или программа неизвестны — ставь scope.passed: true (не блокируй из-за отсутствия информации о скоупе).
+- detail — одно короткое предложение (≤120 символов).
+- reasoning — 1-2 предложения максимум.`
 
 // Evaluate runs the 7-Question Gate on a finding.
 func (g *Gate) Evaluate(ctx context.Context, f *models.Finding) (*Result, error) {
@@ -118,7 +120,7 @@ func (g *Gate) Evaluate(ctx context.Context, f *models.Finding) (*Result, error)
 			{Role: llm.RoleSystem, Content: gateSystemPrompt},
 			{Role: llm.RoleUser, Content: prompt},
 		},
-		MaxTokens:   512,
+		MaxTokens:   2000,
 		Temperature: 0.1,
 		JSONMode:    true,
 	}
@@ -250,7 +252,16 @@ func (g *Gate) parseResponse(findingID, content string) (*Result, error) {
 
 	cleaned := extractJSON(content)
 	if err := json.Unmarshal([]byte(cleaned), &parsed); err != nil {
-		return nil, fmt.Errorf("gate: failed to parse response: %w", err)
+		// Try truncation recovery: response may have been cut off by max_tokens.
+		recovered := recoverTruncatedJSON(cleaned)
+		if rerr := json.Unmarshal([]byte(recovered), &parsed); rerr != nil {
+			return nil, fmt.Errorf("gate: failed to parse response: %w (recovery also failed: %v)", err, rerr)
+		}
+		g.log.Warn("gate: response was truncated, recovered partial JSON",
+			"finding_id", findingID,
+			"raw_len", len(content),
+			"recovered_questions", len(parsed.Questions),
+		)
 	}
 
 	score := 0
@@ -329,6 +340,80 @@ func downgradeSeverity(s models.Severity) string {
 	default:
 		return string(models.SeverityInfo)
 	}
+}
+
+// recoverTruncatedJSON attempts to repair a JSON string that was cut off mid-
+// generation (typically because the LLM hit max_tokens). It finds the last
+// position where the brace/bracket stack is balanced and truncates the input
+// to that point. This lets partial-but-structurally-valid responses still
+// parse (e.g. a gate response with 5/7 questions captured before truncation).
+func recoverTruncatedJSON(s string) string {
+	s = strings.TrimSpace(s)
+	if !strings.HasPrefix(s, "{") && !strings.HasPrefix(s, "[") {
+		return s
+	}
+	var stack []byte
+	lastBalanced := -1
+	inString := false
+	escape := false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if escape {
+			escape = false
+			continue
+		}
+		if c == '\\' && inString {
+			escape = true
+			continue
+		}
+		if c == '"' {
+			inString = !inString
+			continue
+		}
+		if inString {
+			continue
+		}
+		switch c {
+		case '{', '[':
+			stack = append(stack, c)
+		case '}':
+			if len(stack) > 0 && stack[len(stack)-1] == '{' {
+				stack = stack[:len(stack)-1]
+			}
+			if len(stack) == 0 {
+				lastBalanced = i
+			}
+		case ']':
+			if len(stack) > 0 && stack[len(stack)-1] == '[' {
+				stack = stack[:len(stack)-1]
+			}
+			if len(stack) == 0 {
+				lastBalanced = i
+			}
+		}
+	}
+	if lastBalanced > 0 {
+		return s[:lastBalanced+1]
+	}
+	// Truncated in the middle of an array — close open scopes pessimistically.
+	if len(stack) > 0 {
+		var closer []byte
+		for i := len(stack) - 1; i >= 0; i-- {
+			if stack[i] == '{' {
+				closer = append(closer, '}')
+			} else {
+				closer = append(closer, ']')
+			}
+		}
+		// Trim trailing dangling key/comma before closing.
+		trimmed := strings.TrimRight(s, " \t\n\r,:")
+		// If trimmed ends with a string-key (\"foo\"), drop it to avoid \"key\":}.
+		if idx := strings.LastIndex(trimmed, ","); idx >= 0 {
+			trimmed = trimmed[:idx]
+		}
+		return strings.TrimRight(trimmed, " \t\n\r,:") + string(closer)
+	}
+	return s
 }
 
 func extractJSON(s string) string {

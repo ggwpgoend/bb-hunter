@@ -1,6 +1,7 @@
 package gate
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/ggwpgoend/bb-hunter/internal/models"
@@ -227,5 +228,48 @@ func TestDowngradeSeverity(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("downgradeSeverity(%s) = %s, want %s", tt.input, got, tt.want)
 		}
+	}
+}
+
+func TestRecoverTruncatedJSON(t *testing.T) {
+	tests := []struct {
+		name      string
+		input     string
+		wantValid bool // result should be valid JSON
+		wantField string // expected field in parsed result (optional)
+	}{
+		{
+			name:      "complete json untouched",
+			input:     `{"questions":[{"question":"reproducibility","passed":true,"detail":"ok"}],"reasoning":"ok"}`,
+			wantValid: true,
+			wantField: "reproducibility",
+		},
+		{
+			name:      "truncated mid-array — recovers to last balanced }",
+			input:     `{"questions":[{"question":"reproducibility","passed":true,"detail":"ok"},{"question":"evidence","passed":true,"detail":"ok"`,
+			wantValid: true,
+		},
+		{
+			name:      "truncated mid-string — closes scopes",
+			input:     `{"questions":[{"question":"reproducibility","passed":true,"detail":"halfway thro`,
+			wantValid: true,
+		},
+		{
+			name:      "non-json passes through",
+			input:     `not json at all`,
+			wantValid: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := recoverTruncatedJSON(tt.input)
+			var v map[string]interface{}
+			err := json.Unmarshal([]byte(got), &v)
+			isValid := err == nil
+			if isValid != tt.wantValid {
+				t.Errorf("recoverTruncatedJSON(%q) → %q, validJSON=%v want=%v (err=%v)",
+					tt.input, got, isValid, tt.wantValid, err)
+			}
+		})
 	}
 }
