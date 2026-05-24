@@ -160,7 +160,60 @@ func (o *OpenAICompatProvider) Complete(ctx context.Context, req *Request) (*Res
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+o.apiKey)
 
-	httpResp, err := o.httpClient.Do(httpReq)
+	// Retry on transient upstream errors (502/503/504, EOF, reset by peer)
+	// before bubbling out to the round-robin. CloseRouter in particular
+	// produces frequent `upstream_socket_reset` 502s when Anthropic /
+	// OpenAI proxies hiccup; a 1s/2s/4s backoff salvages the bulk of
+	// these without flipping to a weaker free provider.
+	var (
+		httpResp *http.Response
+		respBody []byte
+	)
+	for attempt := 0; attempt < 3; attempt++ {
+		// Rebuild the request body reader on each retry (http.Request
+		// consumes the body on send).
+		if attempt > 0 {
+			httpReq, err = http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
+			if err != nil {
+				return nil, fmt.Errorf("%s: request creation failed: %w", o.name, err)
+			}
+			httpReq.Header.Set("Content-Type", "application/json")
+			httpReq.Header.Set("Authorization", "Bearer "+o.apiKey)
+		}
+		httpResp, err = o.httpClient.Do(httpReq)
+		if err == nil {
+			respBody, err = io.ReadAll(httpResp.Body)
+			httpResp.Body.Close()
+			if err != nil {
+				return nil, fmt.Errorf("%s: read response failed: %w", o.name, err)
+			}
+			if httpResp.StatusCode == 502 || httpResp.StatusCode == 503 || httpResp.StatusCode == 504 {
+				// Transient gateway error — backoff and retry.
+				if attempt < 2 {
+					backoff := time.Duration(1<<attempt) * time.Second // 1s, 2s
+					select {
+					case <-ctx.Done():
+						return nil, fmt.Errorf("%s: cancelled during 5xx retry: %w", o.name, ctx.Err())
+					case <-time.After(backoff):
+					}
+					continue
+				}
+			}
+			break // 2xx, 4xx, 429, or exhausted 5xx retries — handle below
+		}
+		// Network-level failure (timeout, conn reset). Retry up to 2 more times.
+		if attempt < 2 && ctx.Err() == nil {
+			backoff := time.Duration(1<<attempt) * time.Second
+			select {
+			case <-ctx.Done():
+				break
+			case <-time.After(backoff):
+				continue
+			}
+		}
+		break
+	}
+
 	if err != nil {
 		o.mu.Lock()
 		o.consecutiveFailures++
@@ -175,12 +228,6 @@ func (o *OpenAICompatProvider) Complete(ctx context.Context, req *Request) (*Res
 		}
 		o.mu.Unlock()
 		return nil, fmt.Errorf("%s: request failed: %w", o.name, err)
-	}
-	defer httpResp.Body.Close()
-
-	respBody, err := io.ReadAll(httpResp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("%s: read response failed: %w", o.name, err)
 	}
 
 	if httpResp.StatusCode == 429 {

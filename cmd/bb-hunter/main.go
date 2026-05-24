@@ -49,6 +49,7 @@ type stageModelCfg struct {
 	FreeTheAI    string
 	Canopy       string
 	CloseRouter  string // pay-per-use; only used on premium stages by default
+	CodexSale    string // pay-per-use RUB-priced gateway with GPT-5.x family
 	LLM7         string
 	UncloseAI    string
 	Pollinations string
@@ -63,6 +64,17 @@ type stageModelCfg struct {
 //   - chainer:   exploit chain discovery (creative) → creative reasoning
 //   - exploiter: PoC code generation → coding models
 //   - agent:     autonomous bug hunting → best reasoning + tool use
+// Boss config (May 2026, set by user) routes:
+//   - agent      → CloseRouter anthropic/claude-opus-4.7    ($0.20/0.20 per 1M)
+//   - gate       → Codex.Sale  openai/gpt-5.4-mini          (~$0.054 per 1M)
+//   - exploiter  → Codex.Sale  openai/gpt-5.3-codex         (~$0.054 per 1M)
+//   - reporter   → CloseRouter google/gemini-2.5-pro        ($0.11/0.11 per 1M)
+//   - historian  → CloseRouter google/gemini-3.1-flash-lite-preview ($0.10/0.10)
+//
+// codexSaleLeads(stage) decides whether Codex.Sale or CloseRouter is the
+// first provider in the round-robin for a given stage (i.e. which one
+// "wins" when both keys are configured). Other (free) providers are always
+// appended after.
 var stageDefaults = map[string]stageModelCfg{
 	// analyst: Deep processing of large data (scan outputs, DOMs). Needs large context + reasoning.
 	// Gemini 2.5 Flash (1M ctx) is ideal here; Cerebras / Groq cover the reasoning fallback.
@@ -74,11 +86,12 @@ var stageDefaults = map[string]stageModelCfg{
 		FreeTheAI:    "gemini-2.5-flash",
 		Canopy:       "moonshotai/kimi-k2.6", // Kimi has massive context
 		CloseRouter:  "anthropic/claude-3-5-sonnet-20241022",
+		CodexSale:    "gpt-5.4-mini", // x0.9 multiplier, cheap classifier
 		LLM7:         "gpt-o3-2025-04-16", // o3 is great at reasoning
 		UncloseAI:    "hf.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q4_K_M",
 		Pollinations: "openai-large",
 	},
-	// reporter: Writing high-quality bug bounty reports. Needs good formatting and clarity.
+	// reporter: Writing high-quality bug bounty reports. Boss = google/gemini-2.5-pro via CloseRouter.
 	"reporter": {
 		Cerebras:     "qwen-3-235b-a22b-instruct-2507",
 		Groq:         "llama-3.3-70b-versatile",
@@ -86,12 +99,13 @@ var stageDefaults = map[string]stageModelCfg{
 		Samba:        "MiniMax-M2.7",
 		FreeTheAI:    "gemini-2.5-flash",
 		Canopy:       "moonshotai/kimi-k2.6",
-		CloseRouter:  "anthropic/claude-3-5-sonnet-20241022",
+		CloseRouter:  "google/gemini-2.5-pro",
+		CodexSale:    "gpt-5.4", // fallback if CloseRouter exhausted
 		LLM7:         "mistral-large-2411",
 		UncloseAI:    "hf.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q4_K_M",
 		Pollinations: "openai-large",
 	},
-	// historian: Diffing states, tracking what changed over time. Needs large context.
+	// historian: Diffing states, tracking what changed over time. Boss = gemini-3.1-flash-lite-preview.
 	"historian": {
 		Cerebras:     "qwen-3-235b-a22b-instruct-2507",
 		Groq:         "llama-3.3-70b-versatile",
@@ -99,12 +113,13 @@ var stageDefaults = map[string]stageModelCfg{
 		Samba:        "gemma-3-12b-it",
 		FreeTheAI:    "gemini-2.5-flash",
 		Canopy:       "moonshotai/kimi-k2.6",
-		CloseRouter:  "anthropic/claude-3-haiku-20240307",
+		CloseRouter:  "google/gemini-3.1-flash-lite-preview",
+		CodexSale:    "gpt-5.4-mini",
 		LLM7:         "gpt-4o-mini-2024-07-18",
 		UncloseAI:    "hf.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q4_K_M",
 		Pollinations: "openai",
 	},
-	// gate: Fast validation filter (7 questions). Needs speed and strict logic.
+	// gate: Fast validation filter (7 questions). Boss = Codex.Sale gpt-5.4-mini.
 	"gate": {
 		Cerebras:     "qwen-3-235b-a22b-instruct-2507",
 		Groq:         "llama-3.3-70b-versatile",
@@ -112,25 +127,27 @@ var stageDefaults = map[string]stageModelCfg{
 		Samba:        "DeepSeek-V3.2",
 		FreeTheAI:    "gemini-2.5-flash",
 		Canopy:       "minimax/minimax-m2.5",
-		CloseRouter:  "anthropic/claude-3-haiku-20240307",
+		CloseRouter:  "anthropic/claude-haiku-4.5",
+		CodexSale:    "gpt-5.4-mini",
 		LLM7:         "deepseek-r1-0528",
 		UncloseAI:    "hf.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q4_K_M",
 		Pollinations: "openai",
 	},
 	// chainer: Building exploit chains. Needs top-tier reasoning.
 	"chainer": {
-		Cerebras:     "qwen-3-235b-a22b-instruct-2507", // best free reasoning option
+		Cerebras:     "qwen-3-235b-a22b-instruct-2507",
 		Groq:         "llama-3.3-70b-versatile",
 		Gemini:       "gemini-2.5-flash",
 		Samba:        "DeepSeek-V3.1",
 		FreeTheAI:    "gemini-2.5-flash",
 		Canopy:       "minimax/minimax-m2.5",
 		CloseRouter:  "anthropic/claude-opus-4.7",
+		CodexSale:    "gpt-5.4",
 		LLM7:         "deepseek-r1-0528",
 		UncloseAI:    "hf.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q4_K_M",
 		Pollinations: "openai-large",
 	},
-	// exploiter: Writing PoC code, tampers, bypasses. Needs best coding models.
+	// exploiter: Writing PoC code. Boss = Codex.Sale gpt-5.3-codex (codex-tuned, x0.9).
 	"exploiter": {
 		Cerebras:     "qwen-3-235b-a22b-instruct-2507",
 		Groq:         "llama-3.3-70b-versatile",
@@ -138,24 +155,48 @@ var stageDefaults = map[string]stageModelCfg{
 		Samba:        "DeepSeek-V3.2",
 		FreeTheAI:    "gemini-2.5-flash",
 		Canopy:       "xiaomimimo/mimo-v2.5",
-		CloseRouter:  "anthropic/claude-3-5-sonnet-20241022",
-		LLM7:         "qwen2.5-coder-32b-instruct",                             // Specifically for coding
-		UncloseAI:    "hf.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q4_K_M", // Coding specialist
+		CloseRouter:  "openai/gpt-5.3-codex",
+		CodexSale:    "gpt-5.3-codex",
+		LLM7:         "qwen2.5-coder-32b-instruct",
+		UncloseAI:    "hf.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q4_K_M",
 		Pollinations: "qwen-coder",
 	},
-	// agent: The main autonomous driver. Needs absolute best tool calling and planning.
+	// agent: The main autonomous driver. Boss = CloseRouter anthropic/claude-opus-4.7.
 	"agent": {
 		Cerebras:     "qwen-3-235b-a22b-instruct-2507",
 		Groq:         "llama-3.3-70b-versatile",
 		Gemini:       "gemini-2.5-flash",
 		Samba:        "DeepSeek-V3.2",
-		FreeTheAI:    "gemini-2.5-flash", // Claude Opus 4.7 is unmatched for agent tool calling
+		FreeTheAI:    "gemini-2.5-flash",
 		Canopy:       "minimax/minimax-m2.5",
 		CloseRouter:  "anthropic/claude-opus-4.7",
-		LLM7:         "gpt-o3-2025-04-16", // o3 as fallback
+		CodexSale:    "gpt-5.4", // fallback when CloseRouter exhausted
+		LLM7:         "gpt-o3-2025-04-16",
 		UncloseAI:    "hf.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q4_K_M",
 		Pollinations: "deepseek-v3",
 	},
+}
+
+// codexSaleLeadStages lists stages where Codex.Sale should be the first
+// (preferred) provider in the round-robin when both Codex.Sale and
+// CloseRouter are configured. Order matters because llm.Client walks
+// providers in append order until one succeeds.
+var codexSaleLeadStages = map[string]bool{
+	"gate":      true,
+	"exploiter": true,
+}
+
+// noFallbackStages lists stages whose providers MUST be limited to a
+// single, premium LLM with no graceful degradation. When true for a
+// stage, buildStageClient skips every provider except the leader — even
+// the free fallbacks. Use this for reasoning-heavy stages where the
+// downgrade hurts quality more than an outright failure (the agent loop
+// will surface the error and the user can adjust providers).
+//
+// Currently: only the main `agent` stage. Reporter / historian fall back
+// gracefully because short generation is comparatively forgiving.
+var noFallbackStages = map[string]bool{
+	"agent": true,
 }
 
 // stageBuildOpts bundles every key/model knob used when constructing per-stage
@@ -174,6 +215,11 @@ type stageBuildOpts struct {
 	CloseRouterKey   string
 	CloseRouterModel string  // overrides stageDefaults.CloseRouter when non-empty
 	CloseRouterUSD   float64 // daily USD spending cap for CloseRouter
+	CodexSaleKey     string
+	CodexSaleModel   string  // overrides stageDefaults.CodexSale when non-empty
+	CodexSaleUSD     float64 // daily USD spending cap for Codex.Sale
+	CodexSaleRUBPer1M float64 // base RUB price per 1M tokens (default 5.45)
+	CodexSaleRUBPerUSD float64 // RUB→USD rate (default 85)
 }
 
 func agentFindingToModel(f agent.Finding) *models.Finding {
@@ -259,14 +305,71 @@ func buildStageClient(stage string, opts stageBuildOpts, logger *slog.Logger) *l
 
 	var providers []llm.Provider
 
-	// CloseRouter first so the premium model leads round-robin until budget runs out.
 	crModel := opts.CloseRouterModel
 	if crModel == "" {
 		crModel = cfg.CloseRouter
 	}
-	if opts.CloseRouterKey != "" && crModel != "" {
+	csModel := opts.CodexSaleModel
+	if csModel == "" {
+		csModel = cfg.CodexSale
+	}
+
+	// addCloseRouter / addCodexSale are local closures so we can flip their
+	// relative order depending on which provider leads the stage.
+	addCloseRouter := func() {
+		if opts.CloseRouterKey == "" || crModel == "" {
+			return
+		}
 		providers = append(providers, llm.NewCloseRouterProvider(
 			opts.CloseRouterKey, crModel, opts.CloseRouterUSD))
+	}
+	addCodexSale := func() {
+		if opts.CodexSaleKey == "" || csModel == "" {
+			return
+		}
+		providers = append(providers, llm.NewCodexSaleProvider(
+			opts.CodexSaleKey, csModel,
+			opts.CodexSaleRUBPer1M, opts.CodexSaleRUBPerUSD,
+			opts.CodexSaleUSD))
+	}
+
+	// Boss config: gate + exploiter prefer Codex.Sale (cheaper x0.9 GPT-5.x
+	// family); agent / reporter / historian prefer CloseRouter (Claude /
+	// Gemini for reasoning / writing quality). Both providers are present
+	// for graceful degradation when one is exhausted.
+	if codexSaleLeadStages[stage] {
+		addCodexSale()
+		addCloseRouter()
+	} else {
+		addCloseRouter()
+		addCodexSale()
+	}
+
+	// no-fallback stages stop here: the user explicitly asked for the
+	// reasoning model to be CloseRouter Opus 4.7 "at minimum", never
+	// silently downgrading to codex.sale / Cerebras / free Gemini when
+	// it hiccups. The OpenAI-compatible HTTP layer retries 5xx three
+	// times before bubbling the error, which covers the bulk of
+	// transient closerouter `upstream_socket_reset` failures.
+	if noFallbackStages[stage] {
+		if len(providers) == 0 {
+			logger.Warn("stage configured as no-fallback but no paid provider keys present; falling through to free providers",
+				"stage", stage)
+		} else {
+			if len(providers) > 1 {
+				providers = providers[:1] // drop the secondary paid provider too
+			}
+			logger.Info("stage locked to single provider (no fallback)",
+				"stage", stage, "provider", providers[0].Name(), "model", providers[0].Model())
+			client, _ := llm.NewClient(providers...)
+			logger.Info("stage client ready",
+				"stage", stage,
+				"providers", len(providers),
+				"leader", providers[0].Name()+"/"+providers[0].Model(),
+				"no_fallback", true,
+			)
+			return client
+		}
 	}
 
 	// Free premium tier — Cerebras (fastest free reasoning at ~200ms, Qwen-3-235B),
@@ -344,9 +447,14 @@ func buildStageClient(stage string, opts stageBuildOpts, logger *slog.Logger) *l
 
 	client, _ := llm.NewClient(providers...)
 
+	leader := "free-tier"
+	if len(providers) > 0 {
+		leader = providers[0].Name() + "/" + providers[0].Model()
+	}
 	logger.Info("stage client ready",
 		"stage", stage,
 		"providers", len(providers),
+		"leader", leader,
 		"cerebras", cfg.Cerebras,
 		"groq", cfg.Groq,
 		"gemini", cfg.Gemini,
@@ -356,6 +464,7 @@ func buildStageClient(stage string, opts stageBuildOpts, logger *slog.Logger) *l
 		"llm7", cfg.LLM7,
 		"uncloseai", cfg.UncloseAI,
 		"closerouter", crModel,
+		"codexsale", csModel,
 	)
 
 	return client
@@ -385,6 +494,11 @@ func main() {
 	closerouterKey := flag.String("closerouter-key", "", "CloseRouter API key — pay-per-use (env: CLOSEROUTER_API_KEY)")
 	closerouterModel := flag.String("closerouter-model", "", "CloseRouter model override; empty=per-stage default (env: CLOSEROUTER_MODEL)")
 	closerouterBudget := flag.Float64("closerouter-daily-usd", 1.0, "Client-side daily USD spending cap for CloseRouter (0 = disabled, server-side cap still applies)")
+	codexsaleKey := flag.String("codexsale-key", "", "Codex.Sale API key — pay-per-use, OpenAI-compat (env: CODEXSALE_API_KEY)")
+	codexsaleModel := flag.String("codexsale-model", "", "Codex.Sale model override; empty=per-stage default (env: CODEXSALE_MODEL)")
+	codexsaleBudget := flag.Float64("codexsale-daily-usd", 1.0, "Client-side daily USD spending cap for Codex.Sale (0 = disabled)")
+	codexsaleRubPer1M := flag.Float64("codexsale-rub-per-1m", 5.45, "Codex.Sale base price in RUB per 1M tokens (May 2026 rate card)")
+	codexsaleRubPerUSD := flag.Float64("codexsale-rub-per-usd", 85.0, "RUB→USD conversion rate for Codex.Sale spend tracking")
 	llm7Key := flag.String("llm7-key", "", "LLM7.io API key")
 	llm7Model := flag.String("llm7-model", "qwen2.5-coder-32b-instruct", "LLM7.io model name")
 	uncloseaiKey := flag.String("uncloseai-key", "", "UncloseAI API key")
@@ -481,6 +595,12 @@ func main() {
 	}
 	if *closerouterModel == "" {
 		*closerouterModel = os.Getenv("CLOSEROUTER_MODEL")
+	}
+	if *codexsaleKey == "" {
+		*codexsaleKey = os.Getenv("CODEXSALE_API_KEY")
+	}
+	if *codexsaleModel == "" {
+		*codexsaleModel = os.Getenv("CODEXSALE_MODEL")
 	}
 	if env := os.Getenv("OPENROUTER_MODEL"); env != "" {
 		*openrouterModel = env
@@ -695,6 +815,24 @@ func main() {
 		logger.Info("LLM provider added", "name", "closerouter", "model", model, "daily_usd_cap", *closerouterBudget)
 	}
 
+	if *codexsaleKey != "" {
+		// Default to gpt-5.4 if no global override; per-stage routing uses
+		// its own model selection from stageDefaults.CodexSale.
+		model := *codexsaleModel
+		if model == "" {
+			model = "gpt-5.4"
+		}
+		csProv := llm.NewCodexSaleProvider(*codexsaleKey, model,
+			*codexsaleRubPer1M, *codexsaleRubPerUSD, *codexsaleBudget)
+		providers = append(providers, csProv)
+		logger.Info("LLM provider added",
+			"name", "codexsale",
+			"model", model,
+			"price_usd_per_1m", fmt.Sprintf("%.4f", csProv.PricePer1MUSD()),
+			"daily_usd_cap", *codexsaleBudget,
+		)
+	}
+
 	if *llm7Key != "" {
 		providers = append(providers, llm.NewOpenAICompatProvider("llm7", "https://api.llm7.io/v1", *llm7Key, *llm7Model))
 		quotas = append(quotas, cost.ProviderQuota{Name: "llm7", DailyRequests: 15000})
@@ -725,7 +863,7 @@ func main() {
 		*sambaKey != "" || *freetheaiKey != "" ||
 		*canopywaveKey != "" || *canopywaveFastKey != "" ||
 		*llm7Key != "" || *uncloseaiKey != "" ||
-		*closerouterKey != ""
+		*closerouterKey != "" || *codexsaleKey != ""
 	var (
 		analystLLM   *llm.Client
 		reporterLLM  *llm.Client
@@ -735,6 +873,11 @@ func main() {
 		exploiterLLM *llm.Client
 	)
 	stageOpts := stageBuildOpts{
+		CodexSaleKey:       *codexsaleKey,
+		CodexSaleModel:     *codexsaleModel,
+		CodexSaleUSD:       *codexsaleBudget,
+		CodexSaleRUBPer1M:  *codexsaleRubPer1M,
+		CodexSaleRUBPerUSD: *codexsaleRubPerUSD,
 		CerebrasKey:      *cerebrasKey,
 		GroqKey:          *groqKey,
 		GeminiKey:        *geminiKey,
@@ -802,7 +945,11 @@ func main() {
 		}
 
 		verifyFinding := func(fctx context.Context, f agent.Finding) (agent.VerificationResult, error) {
-			te := agent.NewToolExecutor("agent-browser", *screenshotDir, "")
+			// Use a dedicated short --session for verification so we
+			// don't clobber the main agent's browser state mid-loop.
+			te := agent.NewToolExecutor("agent-browser", *screenshotDir, "").
+				WithLogger(logger).
+				WithBrowserSession("bb-hunter-verify")
 			return te.VerifyXSSExecution(fctx, f), nil
 		}
 

@@ -302,3 +302,88 @@ func TestRunCmdStillBlocksDestructive(t *testing.T) {
 		t.Fatalf("destructive filter regressed: %s", got)
 	}
 }
+
+// TestBrowserDefaults verifies the new ToolExecutor browser-knob defaults
+// are sane and that the WithBrowser* setters propagate.
+func TestBrowserDefaults(t *testing.T) {
+	te := NewToolExecutor("", "", "")
+	if te.browserDefaultTimeoutMS != 60_000 {
+		t.Fatalf("default AGENT_BROWSER_DEFAULT_TIMEOUT = %d, want 60_000", te.browserDefaultTimeoutMS)
+	}
+	if te.browserSessionName != "bb-hunter" {
+		t.Fatalf("default --session = %q, want bb-hunter", te.browserSessionName)
+	}
+	if !te.browserCloseOnTimeout {
+		t.Fatalf("default browserCloseOnTimeout should be true")
+	}
+
+	te.WithBrowserSession("verifier").WithBrowserDefaultTimeoutMS(90_000)
+	if te.browserSessionName != "verifier" {
+		t.Fatalf("WithBrowserSession failed: %q", te.browserSessionName)
+	}
+	if te.browserDefaultTimeoutMS != 90_000 {
+		t.Fatalf("WithBrowserDefaultTimeoutMS failed: %d", te.browserDefaultTimeoutMS)
+	}
+}
+
+// TestBrowserHealthCheckMissingBinary ensures the doctor disables the
+// browser when the binary is missing, instead of every browser_* paying
+// the 60s timeout cost on Chrome cold-starts that will never happen.
+func TestBrowserHealthCheckMissingBinary(t *testing.T) {
+	te := NewToolExecutor("agent-browser-definitely-not-installed-xyz", "", "")
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	te.BrowserHealthCheck(ctx)
+
+	if !te.browserDisabled {
+		t.Fatalf("expected browserDisabled=true after missing-binary doctor, got false")
+	}
+	if !strings.Contains(te.browserDoctorReason, "not found on PATH") {
+		t.Fatalf("expected reason to mention PATH, got %q", te.browserDoctorReason)
+	}
+
+	// Subsequent browser_* must fast-fail with the hint, no spawn.
+	got := te.browserOpen(ctx, "https://example.com")
+	if !strings.Contains(got, "agent-browser disabled") {
+		t.Fatalf("expected disabled-hint ERROR, got: %s", got)
+	}
+	if !strings.Contains(got, "http_get") {
+		t.Fatalf("expected fallback hint, got: %s", got)
+	}
+}
+
+// TestIsCDPTimeoutErr — the regex/substring detector for the
+// "✗ CDP command timed out" stderr pattern that triggers daemon reset.
+func TestIsCDPTimeoutErr(t *testing.T) {
+	cases := []struct {
+		in   string
+		want bool
+	}{
+		{"", false},
+		{"some unrelated error\n", false},
+		{"✗ CDP command timed out: Page.navigate", true},
+		{"WARN CDP command timed out: Runtime.evaluate\n", true},
+		{"Error: Failed to connect to Chrome on 127.0.0.1:9222", true},
+		{"No such session found in daemon", true},
+		{"Selector @e3 not found", false}, // a well-formed CLI error, NOT a daemon failure
+	}
+	for _, tc := range cases {
+		if got := isCDPTimeoutErr(tc.in); got != tc.want {
+			t.Errorf("isCDPTimeoutErr(%q) = %v, want %v", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestArgsPreviewTruncation guards that very long eval payloads are
+// length-capped before going into slog (avoids unreadable log lines).
+func TestArgsPreviewTruncation(t *testing.T) {
+	long := strings.Repeat("a", 200)
+	got := argsPreview([]string{"eval", long})
+	if !strings.Contains(got, "...") {
+		t.Fatalf("expected truncation marker, got: %s", got)
+	}
+	if len(got) > 200 {
+		t.Fatalf("preview too long (%d chars): %s", len(got), got)
+	}
+}
