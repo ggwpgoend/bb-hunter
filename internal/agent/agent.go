@@ -128,7 +128,8 @@ func New(cfg Config) *Agent {
 		cfg.LLMDelayMs = 3000
 	}
 	store := NewSessionStore()
-	executor := NewToolExecutor(cfg.AgentBrowserBin, cfg.ScreenshotDir, cfg.ProxyAddr)
+	executor := NewToolExecutor(cfg.AgentBrowserBin, cfg.ScreenshotDir, cfg.ProxyAddr).
+		WithLogger(cfg.Logger)
 	executor.store = store
 	a := &Agent{
 		cfg:      cfg,
@@ -205,18 +206,35 @@ You have HTTP, Browser, Katana, Nuclei, Cmd tools. Use them to GATHER data; do t
 5. If you need custom exploit logic or data processing, use run_cmd to execute python/node/bash. You have full freedom to write and run code.
 
 ## Browser Usage (agent-browser)
-browser_snapshot returns an accessibility tree. Elements are marked like [@e30]. Pass refs directly:
+browser_snapshot returns a COMPACT, INTERACTIVE-ONLY accessibility tree (already -i -c -u — you get only clickable / typeable / linkable elements, with link URLs inline). Elements are marked like [@e30]. Pass refs directly:
 - browser_click @e30
 - browser_type @e4 my text
 - browser_eval document.querySelector('form').submit()
 
+Re-snapshot after EVERY page-changing action — refs go stale immediately on navigation, form submit, dialog open, dynamic re-render.
+
+### Waits — agents fail more from bad waits than bad selectors
+After browser_open or any nav-triggering click, the next browser_* often fires BEFORE the page is ready. Insert an explicit wait:
+- ACTION: browser_wait networkidle      # catch-all for SPAs (preferred after nav)
+- ACTION: browser_wait domcontentloaded # earlier — DOM only, no images/XHR
+- ACTION: browser_wait 2000             # dumb sleep in ms (last resort)
+- ACTION: browser_wait --text "Welcome" # until text appears
+- ACTION: browser_wait --url "**/dashboard"  # until URL matches glob
+- ACTION: browser_wait @e3              # until a specific element appears
+The default form (no args) is networkidle.
+
+### Click verification (SPA-aware)
 After ANY browser_click, ALWAYS verify that navigation actually happened. Run:
   ACTION: browser_eval window.location.href
 If the URL is unchanged AND the element had an href attribute, the click was swallowed by the SPA router. Recover with:
   ACTION: browser_open <the href value>
 Do NOT repeat the same browser_click — it will fail again.
 
-Always call browser_snapshot -i after a page load to refresh the [@e] references.
+### When browser_* fails
+If you get "CDP command timed out" or repeated ERRORs from browser_*, the framework auto-resets the agent-browser daemon on the next call (close-all → fresh Chrome). You should:
+1. Retry the failed command ONCE (the reset is already in flight).
+2. If it fails again, call ACTION: browser_doctor to diagnose (Chrome installed? daemon alive? proxy bad?).
+3. If doctor reports a non-recoverable issue, FALL BACK to http_get / http_raw / run_cmd "curl -m 30 -sS URL" — most recon and reflected-XSS detection works without a browser.
 
 ## Reporting Cadence
 The MOMENT you observe ANY positive anomaly that is consistent with a vulnerability, call report_finding IMMEDIATELY on the next turn. Do not batch findings. Do not keep probing for "stronger" proof — the post-finding pipeline (browser verifier + sandbox PoC) exists SPECIFICALLY to verify your finding for you.
@@ -249,6 +267,21 @@ When in doubt: REPORT. A behavioral-proof finding that the sandbox cannot verify
 
 If your JSON is malformed, the system will extract your description anyway — but try to keep it valid.
 
+## Evidence Attachments (browser-visible vulns)
+For vulnerabilities whose proof is something the human eye can SEE in the browser — alert(1) firing, reflected XSS in the DOM, exposed secrets, broken authorization showing other users' data — call evidence_screenshot RIGHT AFTER the payload renders, BEFORE report_finding. The screenshot is auto-attached to the next report_finding and copied to findings/<id>/. One screenshot per finding is usually enough. Skip it for purely server-side classes (XXE error responses, SQLi error messages, header-only findings) — those don't benefit from a visual.
+
+Example flow for stored/reflected XSS:
+1. browser_open https://target/search?q=<svg onload=alert(1)>
+2. browser_snapshot                                 # observe dialog text in DOM tree
+3. evidence_screenshot xss-search-reflected          # captures the alert dialog visible on screen
+4. report_finding {"vuln_class":"xss",...}           # attachment auto-staged
+
+## HTTP Timeouts
+http_get / http_raw / http_request default to a 10s per-request timeout. If a request returns TIMEOUT, you have three options:
+1. Retry with http_request and an explicit "timeout": 30 in the JSON args (max 60).
+2. Use run_cmd "curl -m 120 -sS '<url>'" for requests that legitimately need longer.
+3. If the slowness IS the signal (time-based SQLi, sleep payloads, sluggish XXE entity expansion), treat the TIMEOUT itself as positive evidence and call report_finding with proof_level="behavioral".
+
 ## Anti-Loop Discipline
 If you see a "SYSTEM NOTE:" message in the conversation, the run loop has detected that you are stuck (repeating an action, oscillating between two tools, semantic repeat of the same vuln probe, or producing repeated errors). When you see one, you MUST change at least one of: (a) the tool, (b) the target URL/endpoint, (c) the vuln class you are probing. Do NOT retry the same action with cosmetic changes (different casing, trailing slash, payload quote style, field order, or curl vs http_request) — that does not break the loop.
 
@@ -258,6 +291,13 @@ Treat [SESSION MEMORY] as authoritative. If it lists Negative evidence, do not r
 // Run starts the autonomous agent loop.
 func (a *Agent) Run(ctx context.Context) ([]Finding, error) {
 	startTime := time.Now()
+
+	// One-shot startup diagnostic for agent-browser. Runs `doctor --offline
+	// --quick` so we don't waste 60s on every browser_* call when the
+	// binary is missing or Chrome failed to install. Non-fatal: if the
+	// doctor reports issues, agent-browser tools just degrade to ERROR
+	// observations and the LLM can fall back to http_get.
+	a.executor.BrowserHealthCheck(ctx)
 
 	// Show banner with provider names
 	var providerNames []string

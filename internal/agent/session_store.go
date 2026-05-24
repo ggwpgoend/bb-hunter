@@ -706,6 +706,9 @@ type httpRequestSpec struct {
 	URL     string            `json:"url"`
 	Headers map[string]string `json:"headers"`
 	Body    string            `json:"body"`
+	// Timeout is the per-request HTTP timeout in seconds. 0 -> default
+	// (10s). Values over the configured ceiling (60s) are clamped.
+	Timeout int `json:"timeout,omitempty"`
 }
 
 func parseHTTPRequestSpec(args string) (httpRequestSpec, error) {

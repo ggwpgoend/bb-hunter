@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -26,15 +27,18 @@ type ToolDef struct {
 // AllTools returns the full list of tools available to the agent.
 func AllTools() []ToolDef {
 	return []ToolDef{
-		{Name: "browser_open", Description: "Open a URL in headless browser", Args: "<url>"},
+		{Name: "browser_open", Description: "Open a URL in headless browser. Default action timeout is 60s (CDP). Pair with browser_wait when the page needs network-idle (SPA, slow assets) before the next browser_* call.", Args: "<url>"},
 		{Name: "browser_screenshot", Description: "Take a screenshot of current page", Args: "<filename>"},
+		{Name: "evidence_screenshot", Description: "Take a screenshot intended as evidence and auto-attach it to the next report_finding. Call this AFTER triggering a payload (e.g. alert dialog rendered, reflected XSS visible, sensitive data exposed in DOM). The screenshot becomes part of the finding's Attachments and is copied to findings/<id>/ on persist.", Args: "[label]"},
 		{Name: "browser_eval", Description: "Execute JavaScript in browser and return result", Args: "<javascript_code>"},
-		{Name: "browser_snapshot", Description: "Get DOM accessibility tree / page text content", Args: ""},
-		{Name: "browser_click", Description: "Click an element by CSS selector", Args: "<css_selector>"},
-		{Name: "browser_type", Description: "Type text into an input field", Args: "<css_selector> <text>"},
-		{Name: "http_get", Description: "Send HTTP GET request and return response headers + body (truncated)", Args: "<url>"},
-		{Name: "http_request", Description: "Send structured HTTP request. Prefer this over http_raw for POST/PUT/custom headers to avoid quoting mistakes.", Args: `{"method":"POST","url":"https://...","headers":{"Content-Type":"application/json"},"body":"..."}`},
-		{Name: "http_raw", Description: "Send raw HTTP request with custom method/headers/body. Wrap header values and bodies that contain spaces in matching \" or ' quotes. Inside a \"...\" group, escape inner double quotes as \\\", or use '...' as the outer pair.", Args: "<method> <url> [\"Header-Name: value\" ...] [\"body: payload\"]"},
+		{Name: "browser_snapshot", Description: "Get DOM accessibility tree (interactive elements only, compact, with URLs). Pair with browser_wait before snapshotting SPA pages that lazy-load content.", Args: ""},
+		{Name: "browser_click", Description: "Click an element by CSS selector or @eN ref from browser_snapshot. Refs go stale after any page-changing action — re-snapshot first.", Args: "<css_selector_or_@ref>"},
+		{Name: "browser_type", Description: "Type text into an input field by CSS selector or @eN ref.", Args: "<css_selector_or_@ref> <text>"},
+		{Name: "browser_wait", Description: "Wait for a page condition before the next browser_* call. Arg forms: '<ms_number>' dumb sleep; '@eN' / '<css>' until element appears; '--load networkidle' wait until network idle (best for SPA); '--load domcontentloaded' until DOMContentLoaded; '--text <s>' until text appears; '--url <glob>' until URL matches.", Args: "<selector|ms|--load networkidle|--load domcontentloaded|--text <s>|--url <glob>>"},
+		{Name: "browser_doctor", Description: "Diagnose agent-browser health (Chrome installed, daemon alive, last error, etc.). Use after a series of browser_* ERRORs to decide whether to keep retrying or fall back to http_get / run_cmd curl.", Args: ""},
+		{Name: "http_get", Description: "Send HTTP GET request and return response headers + body (truncated). Default timeout 10s. For slow endpoints use http_request with \"timeout\":N, or run_cmd \"curl -m N -sS <url>\".", Args: "<url>"},
+		{Name: "http_request", Description: "Send structured HTTP request. Prefer this over http_raw for POST/PUT/custom headers to avoid quoting mistakes. Default timeout 10s; pass \"timeout\":N (seconds, max 60) for slower endpoints.", Args: `{"method":"POST","url":"https://...","headers":{"Content-Type":"application/json"},"body":"...","timeout":10}`},
+		{Name: "http_raw", Description: "Send raw HTTP request with custom method/headers/body. Default timeout 10s. Wrap header values and bodies that contain spaces in matching \" or ' quotes. Inside a \"...\" group, escape inner double quotes as \\\", or use '...' as the outer pair.", Args: "<method> <url> [\"Header-Name: value\" ...] [\"body: payload\"]"},
 		{Name: "run_nuclei", Description: "Run nuclei scanner on a URL with optional template filter", Args: "<url> [template_filter]"},
 		{Name: "run_subfinder", Description: "Enumerate subdomains for a domain", Args: "<domain>"},
 		{Name: "run_httpx", Description: "Probe hosts for live HTTP services", Args: "<host1,host2,...>"},
@@ -71,7 +75,35 @@ type ToolExecutor struct {
 	findings        []Finding
 	store           *SessionStore // session store for recall tool
 
+	// pendingEvidence is a list of file paths captured via evidence_*
+	// tools since the last report_finding. They become Attachments on the
+	// next finding and are then drained.
+	pendingEvidence []string
+
 	browserKills int // consecutive browser process kills
+
+	// logger is used for structured browser/HTTP diagnostics. Defaults to
+	// slog.Default() when not explicitly set via WithLogger.
+	logger *slog.Logger
+
+	// Browser daemon tuning (agent-browser CLI runs as a persistent daemon
+	// between subprocess invocations; these knobs harden it against slow
+	// targets and stale state).
+	browserDefaultTimeoutMS int    // AGENT_BROWSER_DEFAULT_TIMEOUT (ms)
+	browserSessionName      string // --session <name>
+	browserCloseOnTimeout   bool   // run "close --all" before retrying a CDP-timed-out command
+
+	// browserDoctorOK is set by browserHealthCheck (run once at agent
+	// startup). When false, browser_* commands fast-fail with a hint to
+	// use http_get/http_raw/run_cmd curl instead. Empty string == not yet
+	// checked → optimistic: assume available.
+	browserDoctorReason string
+	browserDisabled     bool
+
+	// lastCDPTimeout tracks when the last "CDP command timed out" error
+	// was observed so we don't spam close --all on every consecutive
+	// failure.
+	lastCDPTimeout time.Time
 }
 
 // Finding is a vulnerability discovered by the agent.
@@ -105,6 +137,12 @@ type Finding struct {
 	SandboxExitCode int    `json:"sandbox_exit_code,omitempty"`
 	ReportMarkdown  string `json:"report_markdown,omitempty"`
 	FindingDir      string `json:"finding_dir,omitempty"` // persistence directory
+
+	// Attachments are absolute paths to evidence files captured via
+	// evidence_screenshot (and similar tools) prior to report_finding.
+	// persistFinding copies them into the finding directory and rewrites
+	// these paths to the relative names inside that directory.
+	Attachments []string `json:"attachments,omitempty"`
 }
 
 // NewToolExecutor creates a tool executor.
@@ -119,8 +157,72 @@ func NewToolExecutor(agentBrowserBin, screenshotDir, proxyAddr string) *ToolExec
 		agentBrowserBin: agentBrowserBin,
 		screenshotDir:   screenshotDir,
 		proxyAddr:       proxyAddr,
-		httpClient:      &http.Client{Timeout: 30 * time.Second},
+		// httpClient timeout is a hard ceiling; per-request context
+		// timeouts (default 10s, agent-configurable up to 60s) govern
+		// the actual HTTP cancellation. Leave room above the per-
+		// request max so we never trip the client-wide timeout in
+		// normal use.
+		httpClient: &http.Client{Timeout: 65 * time.Second},
+
+		logger:                  slog.Default(),
+		browserDefaultTimeoutMS: 60_000, // agent-browser default is 25s — too low for slow lab pages
+		browserSessionName:      "bb-hunter",
+		browserCloseOnTimeout:   true,
 	}
+}
+
+// WithLogger attaches a structured logger. Returns the same executor so it
+// can be used in a builder chain.
+func (te *ToolExecutor) WithLogger(l *slog.Logger) *ToolExecutor {
+	if l != nil {
+		te.logger = l
+	}
+	return te
+}
+
+// WithBrowserSession overrides the agent-browser --session name. Empty
+// string disables session isolation (CLI default "default" will be used).
+func (te *ToolExecutor) WithBrowserSession(name string) *ToolExecutor {
+	te.browserSessionName = name
+	return te
+}
+
+// WithBrowserDefaultTimeoutMS overrides the AGENT_BROWSER_DEFAULT_TIMEOUT
+// env var injected when spawning agent-browser. Zero -> leave unset, the
+// CLI default (25 000 ms) applies.
+func (te *ToolExecutor) WithBrowserDefaultTimeoutMS(ms int) *ToolExecutor {
+	te.browserDefaultTimeoutMS = ms
+	return te
+}
+
+// HTTP per-request timeout policy: default 10s, agent-overridable via the
+// "timeout" JSON field on http_request, hard ceiling at 60s.
+const (
+	httpDefaultTimeout = 10 * time.Second
+	httpMaxTimeout     = 60 * time.Second
+)
+
+// resolveHTTPTimeout maps a user-supplied seconds value to a duration. Zero
+// or negative -> default; over the ceiling -> ceiling.
+func resolveHTTPTimeout(seconds int) time.Duration {
+	if seconds <= 0 {
+		return httpDefaultTimeout
+	}
+	d := time.Duration(seconds) * time.Second
+	if d > httpMaxTimeout {
+		return httpMaxTimeout
+	}
+	return d
+}
+
+// httpTimeoutHint is the observation returned to the agent when an HTTP
+// request was killed by the per-request timeout. It tells the agent both
+// what happened and the two ways out — explicit "timeout":N or run_cmd curl.
+func httpTimeoutHint(d time.Duration, url string) string {
+	return fmt.Sprintf(
+		"TIMEOUT after %s on %s. Hints: (a) retry with http_request {\"timeout\":30,...} for slow endpoints; (b) for >60s use run_cmd \"curl -m 120 -sS '%s'\"; (c) time-based attacks (sleep/WAITFOR) are reportable EVEN IF the request times out — note the timing and call report_finding.",
+		d, url, url,
+	)
 }
 
 // Findings returns all reported findings.
@@ -148,18 +250,17 @@ func (te *ToolExecutor) DropLastFinding() (Finding, bool) {
 	return f, true
 }
 
-func (te *ToolExecutor) dropFinding(f Finding) {
-	for i := len(te.findings) - 1; i >= 0; i-- {
-		if te.findings[i] == f {
-			te.findings = append(te.findings[:i], te.findings[i+1:]...)
-			return
-		}
-	}
+// dropFinding removes the most recently appended finding. The post-finding
+// pipeline always operates on the last-appended finding (see Run), so an
+// identity-based search is unnecessary — and now impossible since Finding
+// contains slice fields and is no longer comparable with ==.
+func (te *ToolExecutor) dropFinding(_ Finding) {
+	te.DropLastFinding()
 }
 
 // Execute runs a tool and returns the observation string.
 func (te *ToolExecutor) Execute(ctx context.Context, tool, args string) string {
-	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
 
 	switch tool {
@@ -167,6 +268,8 @@ func (te *ToolExecutor) Execute(ctx context.Context, tool, args string) string {
 		return te.browserOpen(ctx, args)
 	case "browser_screenshot":
 		return te.browserScreenshot(ctx, args)
+	case "evidence_screenshot":
+		return te.evidenceScreenshot(ctx, args)
 	case "browser_eval":
 		return te.browserEval(ctx, args)
 	case "browser_snapshot":
@@ -175,6 +278,10 @@ func (te *ToolExecutor) Execute(ctx context.Context, tool, args string) string {
 		return te.browserClick(ctx, args)
 	case "browser_type":
 		return te.browserType(ctx, args)
+	case "browser_wait":
+		return te.browserWait(ctx, args)
+	case "browser_doctor":
+		return te.browserDoctorTool(ctx)
 	case "http_get":
 		return te.httpGet(ctx, args)
 	case "http_raw":
@@ -241,6 +348,54 @@ func (te *ToolExecutor) browserScreenshot(ctx context.Context, filename string) 
 	return fmt.Sprintf("OK: screenshot saved to %s", path)
 }
 
+// evidenceScreenshot captures the current browser page as evidence for the
+// next report_finding call. Optional positional argument is a short label
+// (kebab-case recommended) that's woven into the filename; otherwise a
+// timestamp is used. The path is staged in pendingEvidence and consumed by
+// reportFinding (drained into Finding.Attachments).
+func (te *ToolExecutor) evidenceScreenshot(ctx context.Context, label string) string {
+	label = sanitizeEvidenceLabel(stripOuterQuotes(label))
+	if label == "" {
+		label = "evidence"
+	}
+	name := fmt.Sprintf("%s_%d.png", label, time.Now().UnixMilli())
+	path := filepath.Join(te.screenshotDir, name)
+	_ = os.MkdirAll(te.screenshotDir, 0o755)
+
+	_, err := te.runBrowserCmd(ctx, "screenshot", path)
+	if err != nil {
+		return fmt.Sprintf("ERROR: %v", err)
+	}
+	te.pendingEvidence = append(te.pendingEvidence, path)
+	return fmt.Sprintf("OK: evidence captured (%s) — will attach to next report_finding (pending=%d)", path, len(te.pendingEvidence))
+}
+
+// sanitizeEvidenceLabel restricts an evidence label to a safe filename slug:
+// lowercase ASCII letters/digits, dash, underscore. Anything else collapses
+// to '_'. Trailing/leading separators are trimmed. Empty input -> "".
+func sanitizeEvidenceLabel(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-', r == '_':
+			b.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			b.WriteRune(r + 32)
+		default:
+			b.WriteRune('_')
+		}
+	}
+	out := strings.Trim(b.String(), "_-")
+	if len(out) > 40 {
+		out = out[:40]
+	}
+	return out
+}
+
 func (te *ToolExecutor) browserEval(ctx context.Context, js string) string {
 	js = stripOuterQuotes(js)
 	if js == "" {
@@ -253,12 +408,61 @@ func (te *ToolExecutor) browserEval(ctx context.Context, js string) string {
 	return truncate(out, 80000)
 }
 
+// browserSnapshot returns an interactive-only, compact accessibility tree
+// with URLs on links. Per the agent-browser core skill, `-i` is the
+// preferred mode for AI agents — it cuts payload size by ~80% versus the
+// full tree (no empty structural nodes, no static text). Refs (@e1, @e2,
+// ...) are still emitted and can be passed to browser_click / browser_type.
 func (te *ToolExecutor) browserSnapshot(ctx context.Context) string {
-	out, err := te.runBrowserCmd(ctx, "snapshot")
+	out, err := te.runBrowserCmd(ctx, "snapshot", "-i", "-c", "-u")
 	if err != nil {
 		return fmt.Sprintf("ERROR: %v", err)
 	}
 	return truncate(out, 80000)
+}
+
+// browserWait exposes agent-browser's `wait` command to the agent. It
+// accepts the full surface: numeric ms (`2000`), selector / @ref, and the
+// flag forms (`--load networkidle`, `--load domcontentloaded`,
+// `--text "..."`, `--url "**/dashboard"`, `--fn "<js>"`). Empty arg →
+// defaults to `--load networkidle` which is the catch-all for SPA navs.
+func (te *ToolExecutor) browserWait(ctx context.Context, args string) string {
+	args = strings.TrimSpace(args)
+	var cmdArgs []string
+	if args == "" {
+		cmdArgs = []string{"wait", "--load", "networkidle"}
+	} else {
+		// Allow shorthand "networkidle" / "domcontentloaded" / "load" by
+		// auto-prefixing --load when the arg is a known wait state.
+		switch strings.ToLower(args) {
+		case "networkidle", "domcontentloaded", "load":
+			cmdArgs = []string{"wait", "--load", strings.ToLower(args)}
+		default:
+			parts := splitArgsQuoteAware(args)
+			cmdArgs = append([]string{"wait"}, parts...)
+		}
+	}
+	out, err := te.runBrowserCmd(ctx, cmdArgs...)
+	if err != nil {
+		return fmt.Sprintf("ERROR: %v", err)
+	}
+	if strings.TrimSpace(out) == "" {
+		return "OK: wait completed"
+	}
+	return truncate(out, 4000)
+}
+
+// browserDoctorTool exposes `agent-browser doctor --offline --quick` to
+// the agent so it can decide whether browser_* is healthy or whether it
+// should fall back to http_get / run_cmd curl. The CLI doctor checks for
+// Chrome installation, daemon state, version skew, and obvious env
+// problems without making any network calls.
+func (te *ToolExecutor) browserDoctorTool(ctx context.Context) string {
+	out, err := te.runBrowserCmd(ctx, "doctor", "--offline", "--quick")
+	if err != nil {
+		return fmt.Sprintf("ERROR: %v", err)
+	}
+	return truncate(out, 8000)
 }
 
 func (te *ToolExecutor) VerifyXSSExecution(ctx context.Context, f Finding) VerificationResult {
@@ -350,32 +554,235 @@ func (te *ToolExecutor) browserType(ctx context.Context, args string) string {
 	return truncate(out, 80000)
 }
 
+// runBrowserCmd spawns the `agent-browser` CLI with the given args and
+// returns its stdout. The CLI runs as a persistent daemon between calls
+// (state is preserved across subprocess invocations); this wrapper layers
+// on the bb-hunter-specific harderning:
+//
+//  1. Default action timeout bumped from the CLI default (25 s) to 60 s
+//     via AGENT_BROWSER_DEFAULT_TIMEOUT — slow lab pages (PortSwigger,
+//     LFI labs with heavy JS) often need >25 s to fire DOMContentLoaded.
+//  2. --session bb-hunter isolates our state from any other agent-browser
+//     daemon running on the same host.
+//  3. If the call fails with "CDP command timed out" we treat the daemon
+//     as stale: call `agent-browser close --all` to kill Chrome + daemon
+//     and retry the original command exactly once (with a fresh daemon).
+//  4. Stderr is captured separately and logged at Warn level with full
+//     structured fields — no more "ERROR: agent-browser open: …" with no
+//     visibility into what actually went wrong.
+//  5. If the binary is missing or the doctor disabled us at startup, we
+//     fast-fail with a hint instead of spinning up Chrome every call.
 func (te *ToolExecutor) runBrowserCmd(ctx context.Context, args ...string) (string, error) {
-	// Apply a 45s timeout so a hung agent-browser doesn't block the step.
-	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, te.agentBrowserBin, args...)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		errMsg := stderr.String()
-		if errMsg == "" {
-			errMsg = err.Error()
+	if te.browserDisabled {
+		return "", fmt.Errorf("agent-browser disabled by startup doctor: %s — use http_get/http_raw/run_cmd curl instead",
+			strings.TrimSpace(te.browserDoctorReason))
+	}
+	// Outer Go-side timeout: must be > AGENT_BROWSER_DEFAULT_TIMEOUT so the
+	// CLI's own CDP timeout fires first (giving us a parseable stderr) rather
+	// than us SIGKILL-ing the daemon mid-command.
+	outerTimeout := 90 * time.Second
+	if te.browserDefaultTimeoutMS > 0 {
+		// 30s headroom for CLI startup, Chrome cold-start, IPC, etc.
+		if d := time.Duration(te.browserDefaultTimeoutMS)*time.Millisecond + 30*time.Second; d > outerTimeout {
+			outerTimeout = d
 		}
-		// Track consecutive kills/crashes.
-		if strings.Contains(errMsg, "killed") || strings.Contains(errMsg, "signal") || ctx.Err() != nil {
+	}
+	stdout, stderr, runErr := te.spawnBrowser(ctx, outerTimeout, args)
+
+	// CDP timeout / stale daemon recovery: agent-browser returns a
+	// structured error "✗ CDP command timed out: <op>" when Chrome stops
+	// responding on the running daemon. The fix is to kill the daemon
+	// (close --all) and retry from a fresh state.
+	stderrStr := stderr.String()
+	if runErr != nil && te.browserCloseOnTimeout && isCDPTimeoutErr(stderrStr) &&
+		// Don't recurse: the close --all itself must not trigger another retry.
+		!(len(args) > 0 && args[0] == "close") &&
+		// Throttle to one recovery per 60s — if a target page is just
+		// inherently slow, we don't want to ping-pong daemons.
+		time.Since(te.lastCDPTimeout) > 60*time.Second {
+
+		te.lastCDPTimeout = time.Now()
+		te.logger.Warn("agent-browser: CDP timeout — resetting daemon",
+			"cmd", args[0],
+			"stderr", strings.TrimSpace(stderrStr),
+		)
+		// Kill all daemons + Chrome. We deliberately ignore the result;
+		// failure here just means there was nothing to close.
+		closeCtx, closeCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		_, _, _ = te.spawnBrowser(closeCtx, 15*time.Second, []string{"close", "--all"})
+		closeCancel()
+
+		// Retry the original command once with a fresh daemon.
+		stdout, stderr, runErr = te.spawnBrowser(ctx, outerTimeout, args)
+		stderrStr = stderr.String()
+		if runErr == nil {
+			te.logger.Info("agent-browser: recovered after daemon reset", "cmd", args[0])
+		}
+	}
+
+	if runErr != nil {
+		errMsg := strings.TrimSpace(stderrStr)
+		if errMsg == "" {
+			errMsg = runErr.Error()
+		}
+		te.logger.Warn("agent-browser: command failed",
+			"cmd", args[0],
+			"args", argsPreview(args),
+			"stderr", errMsg,
+			"go_err", runErr.Error(),
+		)
+		// Track consecutive kills/crashes (only for crashes, not for
+		// well-formed CLI errors like "selector not found").
+		if isFatalProcessErr(stderrStr, runErr, ctx) {
 			te.browserKills++
 		}
 		if te.browserKills >= 3 {
 			return "", fmt.Errorf("agent-browser %s: %s (browser crashed %d times consecutively — consider using http_get/http_raw/run_cmd curl instead)",
-				args[0], strings.TrimSpace(errMsg), te.browserKills)
+				args[0], errMsg, te.browserKills)
 		}
-		return "", fmt.Errorf("agent-browser %s: %s", args[0], strings.TrimSpace(errMsg))
+		return "", fmt.Errorf("agent-browser %s: %s", args[0], errMsg)
 	}
-	te.browserKills = 0 // reset on success
+	te.browserKills = 0
+	te.logger.Debug("agent-browser: ok",
+		"cmd", args[0],
+		"args", argsPreview(args),
+		"bytes", stdout.Len(),
+	)
 	return stdout.String(), nil
+}
+
+// spawnBrowser is the raw exec wrapper used by runBrowserCmd. It applies the
+// outer Go-side timeout, builds the final argv (with --session prefix), and
+// captures stdout/stderr into the provided buffers. Kept separate from
+// runBrowserCmd so the CDP-timeout recovery path can reuse it without
+// re-entering the recovery loop.
+func (te *ToolExecutor) spawnBrowser(ctx context.Context, outerTimeout time.Duration, args []string) (bytes.Buffer, bytes.Buffer, error) {
+	ctx, cancel := context.WithTimeout(ctx, outerTimeout)
+	defer cancel()
+
+	finalArgs := make([]string, 0, len(args)+2)
+	if te.browserSessionName != "" {
+		// --session is a global flag; must precede the command.
+		finalArgs = append(finalArgs, "--session", te.browserSessionName)
+	}
+	finalArgs = append(finalArgs, args...)
+
+	cmd := exec.CommandContext(ctx, te.agentBrowserBin, finalArgs...)
+	// Inherit the parent env then layer on AGENT_BROWSER_DEFAULT_TIMEOUT.
+	// We do NOT propagate proxyAddr here — agent-browser picks proxy up
+	// from --proxy or HTTP_PROXY/HTTPS_PROXY, both of which the caller
+	// can pre-set if needed. Keeping this simple avoids surprises when
+	// the user runs the binary inside Burp / mitmproxy.
+	env := os.Environ()
+	if te.browserDefaultTimeoutMS > 0 {
+		env = append(env, fmt.Sprintf("AGENT_BROWSER_DEFAULT_TIMEOUT=%d", te.browserDefaultTimeoutMS))
+	}
+	cmd.Env = env
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	return stdout, stderr, err
+}
+
+// isCDPTimeoutErr matches the CLI's "✗ CDP command timed out: <op>"
+// stderr pattern. This is the canary that the daemon's Chrome instance
+// has gone unresponsive and a close --all is warranted.
+func isCDPTimeoutErr(stderr string) bool {
+	s := strings.ToLower(stderr)
+	return strings.Contains(s, "cdp command timed out") ||
+		strings.Contains(s, "failed to connect to chrome") ||
+		strings.Contains(s, "no such session")
+}
+
+// isFatalProcessErr returns true when the agent-browser invocation
+// crashed (SIGKILL, SIGSEGV, exec failure) as opposed to returning a
+// well-formed CLI error message (selector not found, ref expired, etc).
+// Only fatal errors count toward the browserKills throttle.
+func isFatalProcessErr(stderr string, runErr error, ctx context.Context) bool {
+	if ctx.Err() != nil {
+		// Outer context cancelled / deadline exceeded: the parent step
+		// killed us, not Chrome.
+		return true
+	}
+	if runErr == nil {
+		return false
+	}
+	lower := strings.ToLower(stderr + " " + runErr.Error())
+	for _, m := range []string{"killed", "signal", "panic", "segmentation", "exit status 137"} {
+		if strings.Contains(lower, m) {
+			return true
+		}
+	}
+	return false
+}
+
+// argsPreview returns a single-line, length-capped representation of an
+// argv list, safe for slog output. Eval / fill payloads are truncated to
+// keep log lines readable.
+func argsPreview(args []string) string {
+	const maxLen = 160
+	var sb strings.Builder
+	for i, a := range args {
+		if i > 0 {
+			sb.WriteByte(' ')
+		}
+		if len(a) > 80 {
+			sb.WriteString(a[:77])
+			sb.WriteString("...")
+		} else {
+			sb.WriteString(a)
+		}
+		if sb.Len() > maxLen {
+			sb.WriteString(" ...")
+			break
+		}
+	}
+	return sb.String()
+}
+
+// BrowserHealthCheck runs `agent-browser doctor --offline --quick` once
+// at startup and disables browser_* tools if the doctor reports a
+// non-recoverable problem (missing binary, missing Chrome, Wayland-only
+// env, etc.). Called from main.go after the executor is constructed.
+//
+// Failure modes:
+//   - Binary not found on PATH    → log Error, browserDisabled=true
+//   - Binary found but doctor fails → log Warn, mark reason but stay
+//     optimistic (some doctor checks fail spuriously on first run); the
+//     first real browser_* will surface the actual error to the agent.
+//   - All good                    → log Info with version, leave enabled.
+func (te *ToolExecutor) BrowserHealthCheck(ctx context.Context) {
+	// First — is the binary even on PATH?
+	if _, err := exec.LookPath(te.agentBrowserBin); err != nil {
+		te.browserDisabled = true
+		te.browserDoctorReason = fmt.Sprintf("binary '%s' not found on PATH", te.agentBrowserBin)
+		te.logger.Error("agent-browser: binary missing",
+			"bin", te.agentBrowserBin,
+			"hint", "install with `npm install -g agent-browser && agent-browser install --with-deps`",
+		)
+		return
+	}
+
+	cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	stdout, stderr, err := te.spawnBrowser(cctx, 30*time.Second, []string{"doctor", "--offline", "--quick"})
+	combined := strings.TrimSpace(stdout.String() + "\n" + stderr.String())
+	if err != nil {
+		te.browserDoctorReason = combined
+		// Don't disable on a non-zero doctor exit — the CLI sometimes
+		// returns 1 for "minor issue, can still run". Just log loud and
+		// let the first real call confirm or refute.
+		te.logger.Warn("agent-browser: doctor reported issues",
+			"err", err.Error(),
+			"output", truncate(combined, 1200),
+		)
+		return
+	}
+	te.logger.Info("agent-browser: doctor OK",
+		"output", truncate(combined, 600),
+	)
 }
 
 // HTTP tools.
@@ -385,30 +792,7 @@ func (te *ToolExecutor) httpGet(ctx context.Context, url string) string {
 	if url == "" {
 		return "ERROR: url is required"
 	}
-
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return fmt.Sprintf("ERROR: %v", err)
-	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) BB-Hunter-Agent/1.0")
-
-	resp, err := te.httpClient.Do(req)
-	if err != nil {
-		return fmt.Sprintf("ERROR: %v", err)
-	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 100000))
-
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("HTTP %d %s\n", resp.StatusCode, resp.Status))
-	for k, v := range resp.Header {
-		sb.WriteString(fmt.Sprintf("%s: %s\n", k, strings.Join(v, ", ")))
-	}
-	sb.WriteString("\n")
-	sb.WriteString(string(body))
-
-	return truncate(filterHTTPObservation(sb.String()), 80000)
+	return te.doHTTPRequest(ctx, "GET", url, nil, "", 0)
 }
 
 func (te *ToolExecutor) httpRaw(ctx context.Context, args string) string {
@@ -416,59 +800,48 @@ func (te *ToolExecutor) httpRaw(ctx context.Context, args string) string {
 	if len(parts) < 2 {
 		return `ERROR: usage: http_raw <method> <url> ["Header-Name: value" ...] ["body: payload"]`
 	}
-
 	method := strings.ToUpper(parts[0])
 	url := parts[1]
 	headers, bodyStr := parseHTTPRawParts(parts[2:])
-
-	var bodyReader io.Reader
-	if bodyStr != "" {
-		bodyReader = strings.NewReader(bodyStr)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, method, url, bodyReader)
-	if err != nil {
-		return fmt.Sprintf(`ERROR: %v. Expected format: http_raw POST <url> "Content-Type: application/json" "body: {\"key\":\"val\"}"`, err)
-	}
-	for k, v := range headers {
-		req.Header.Set(k, v)
-	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) BB-Hunter-Agent/1.0")
-
-	resp, err := te.httpClient.Do(req)
-	if err != nil {
-		return fmt.Sprintf("ERROR: %v", err)
-	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 100000))
-
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("HTTP %d %s\n", resp.StatusCode, resp.Status))
-	for k, v := range resp.Header {
-		sb.WriteString(fmt.Sprintf("%s: %s\n", k, strings.Join(v, ", ")))
-	}
-	sb.WriteString("\n")
-	sb.WriteString(string(body))
-
-	return truncate(filterHTTPObservation(sb.String()), 80000)
+	return te.doHTTPRequest(ctx, method, url, headers, bodyStr, 0)
 }
 
 func (te *ToolExecutor) httpRequest(ctx context.Context, args string) string {
 	spec, err := parseHTTPRequestSpec(args)
 	if err != nil {
-		return fmt.Sprintf(`ERROR: invalid http_request JSON: %v. Expected {"method":"POST","url":"https://...","headers":{"Content-Type":"application/json"},"body":"..."}`, err)
+		return fmt.Sprintf(`ERROR: invalid http_request JSON: %v. Expected {"method":"POST","url":"https://...","headers":{"Content-Type":"application/json"},"body":"...","timeout":10}`, err)
 	}
+	headers := spec.Headers
+	if headers == nil {
+		headers = map[string]string{}
+	}
+	return te.doHTTPRequest(ctx, spec.Method, spec.URL, headers, spec.Body, spec.Timeout)
+}
+
+// doHTTPRequest is the shared transport for http_get / http_raw / http_request.
+// timeoutSec=0 -> httpDefaultTimeout. Any timeoutSec > httpMaxTimeout is
+// clamped. On per-request timeout it returns the structured TIMEOUT hint so
+// the agent can switch tactics (longer explicit timeout or run_cmd curl).
+func (te *ToolExecutor) doHTTPRequest(ctx context.Context, method, rawURL string, headers map[string]string, body string, timeoutSec int) string {
+	if strings.TrimSpace(rawURL) == "" {
+		return "ERROR: url is required"
+	}
+	if method == "" {
+		method = "GET"
+	}
+	timeout := resolveHTTPTimeout(timeoutSec)
+	reqCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 
 	var bodyReader io.Reader
-	if spec.Body != "" {
-		bodyReader = strings.NewReader(spec.Body)
+	if body != "" {
+		bodyReader = strings.NewReader(body)
 	}
-	req, err := http.NewRequestWithContext(ctx, spec.Method, spec.URL, bodyReader)
+	req, err := http.NewRequestWithContext(reqCtx, method, rawURL, bodyReader)
 	if err != nil {
 		return fmt.Sprintf("ERROR: %v", err)
 	}
-	for k, v := range spec.Headers {
+	for k, v := range headers {
 		if isValidHeaderName(k) {
 			req.Header.Set(k, v)
 		}
@@ -477,11 +850,16 @@ func (te *ToolExecutor) httpRequest(ctx context.Context, args string) string {
 
 	resp, err := te.httpClient.Do(req)
 	if err != nil {
+		// Distinguish per-request timeout from other transport errors so the
+		// agent knows it can extend the timeout or fall back to curl.
+		if reqCtx.Err() == context.DeadlineExceeded {
+			return httpTimeoutHint(timeout, rawURL)
+		}
 		return fmt.Sprintf("ERROR: %v", err)
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 100000))
+	bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 100000))
 
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("HTTP %d %s\n", resp.StatusCode, resp.Status))
@@ -489,7 +867,7 @@ func (te *ToolExecutor) httpRequest(ctx context.Context, args string) string {
 		sb.WriteString(fmt.Sprintf("%s: %s\n", k, strings.Join(v, ", ")))
 	}
 	sb.WriteString("\n")
-	sb.WriteString(string(body))
+	sb.Write(bodyBytes)
 
 	return truncate(filterHTTPObservation(sb.String()), 80000)
 }
@@ -632,8 +1010,20 @@ func (te *ToolExecutor) reportFinding(args string) string {
 		f.Severity = "medium"
 	}
 
+	// Drain pending evidence files (collected by evidence_screenshot etc.)
+	// into Finding.Attachments. The persist stage will copy them into the
+	// finding directory and rewrite Attachments to relative names.
+	if len(te.pendingEvidence) > 0 {
+		f.Attachments = append(f.Attachments, te.pendingEvidence...)
+		te.pendingEvidence = nil
+	}
+
 	te.findings = append(te.findings, f)
-	return fmt.Sprintf("OK: finding #%d reported — %s %s at %s", len(te.findings), f.Severity, f.VulnClass, f.URL)
+	attachNote := ""
+	if n := len(f.Attachments); n > 0 {
+		attachNote = fmt.Sprintf(" (%d attachment(s) staged)", n)
+	}
+	return fmt.Sprintf("OK: finding #%d reported — %s %s at %s%s", len(te.findings), f.Severity, f.VulnClass, f.URL, attachNote)
 }
 
 var xssPayloadRe = regexp.MustCompile(`(?i)(<script[^>]*>.*?</script>|<svg[^>]*onload[^>]*>|<img[^>]*onerror[^>]*>|javascript:[^\s"'<>]+|alert\s*\([^)]*\))`)

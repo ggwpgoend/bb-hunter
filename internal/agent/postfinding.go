@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -172,11 +173,34 @@ func (a *Agent) processFinding(ctx context.Context, f Finding) (Finding, bool, s
 
 // persistFinding writes the finding and its artifacts to
 // <baseDir>/<finding-id>/{finding.json, report.ru.md, poc.<ext>,
-// sandbox.json}. Returns the per-finding directory path.
+// sandbox.json, screenshot-N.<ext>}. Returns the per-finding directory path.
+//
+// Side effect: f.Attachments paths are rewritten in-place to the relative
+// names inside dir so finding.json points at the copied files rather than
+// the original (transient) screenshot/screenshots paths.
 func persistFinding(baseDir string, f Finding) (string, error) {
 	dir := filepath.Join(baseDir, f.ID)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", fmt.Errorf("mkdir: %w", err)
+	}
+
+	// Copy attachments first so we can serialise the rewritten paths into
+	// finding.json. Failures on a single attachment are logged into the
+	// remaining attachment list but don't fail the whole persist step.
+	if len(f.Attachments) > 0 {
+		copied := make([]string, 0, len(f.Attachments))
+		for i, src := range f.Attachments {
+			name := attachmentName(i, src)
+			dst := filepath.Join(dir, name)
+			if err := copyFile(src, dst); err != nil {
+				// Preserve the original path so the user can still find
+				// the file even if the copy failed.
+				copied = append(copied, src)
+				continue
+			}
+			copied = append(copied, name)
+		}
+		f.Attachments = copied
 	}
 
 	// finding.json — full serialised finding (sans heavy fields below; the
@@ -224,6 +248,43 @@ func persistFinding(baseDir string, f Finding) (string, error) {
 	}
 
 	return dir, nil
+}
+
+// attachmentName produces the destination filename for an attachment inside
+// the finding directory. Preserves the source extension so .png stays .png,
+// .har stays .har, etc. Index keeps the order stable across multiple files.
+func attachmentName(index int, src string) string {
+	ext := strings.ToLower(filepath.Ext(src))
+	if ext == "" {
+		ext = ".bin"
+	}
+	base := strings.TrimSuffix(filepath.Base(src), filepath.Ext(src))
+	// Use the source basename when it's already short and meaningful (e.g.
+	// "xxe-entity-expanded_1700.png"); otherwise fall back to a numeric
+	// "attachment-N.<ext>" so a giant timestamp doesn't bloat the name.
+	if len(base) > 0 && len(base) <= 40 {
+		return fmt.Sprintf("attachment-%d_%s%s", index+1, base, ext)
+	}
+	return fmt.Sprintf("attachment-%d%s", index+1, ext)
+}
+
+// copyFile copies src to dst with 0644 perms. Streams via io.Copy so large
+// HAR/video files don't load entirely into memory.
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		return err
+	}
+	return out.Close()
 }
 
 func pocExtension(interpreter string) string {
